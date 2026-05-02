@@ -502,8 +502,8 @@ def main():
 
             # If a plan is already running, honor the deadline and hold position.
             if plan_thread is not None and plan_thread.is_alive():
-                if plan_started_at is not None and (time.time() - plan_started_at) > 0.2:
-                    print("[WARNING] Planner exceeded 200ms budget - holding position", flush=True)
+                if plan_started_at is not None and (time.time() - plan_started_at) > 1.0:
+                    print("[WARNING] Planner exceeded 1000ms budget - holding position", flush=True)
                 return False
 
             # If previous plan finished, pull result.
@@ -689,18 +689,16 @@ def main():
                             if FLY_VEHICLE:
                                 mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
 
-                    # During replanning or right after replan: do not fly forward, keep fusing frames. Manual yaw always enabled.
+                    # During replanning or right after replan: do not fly forward, keep fusing frames. Manual yaw disabled during replan.
                     if replan_pending or held_from_replan:
                         traj_index = None
                         fuse_only = True
-                        # Preserve manual yaw control during replan
-                        yaw_replan = 0
-                        if last_key == 'q':
-                            yaw_replan = 0.3
-                        elif last_key == 'e':
-                            yaw_replan = -0.3
+                        # Clear yaw keys during replanning to prevent stuck yaw commands
+                        if last_key in ('q', 'e'):
+                            with _key_lock:
+                                last_key_pressed = None
                         if FLY_VEHICLE:
-                            mavc.send_body_offset_ned_vel(0, 0, yaw_rate=yaw_replan)
+                            mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
                     elif current_path_index < len(current_path_sequence):
                         traj_index = current_path_sequence[current_path_index]
                         if traj_index is None:
@@ -772,7 +770,7 @@ def main():
                     # Periodic collision check: only check every 5 frames to save compute (with state lock for race condition protection)
                     with _state_lock:
                         collision_check_counter += 1
-                        should_check_collision = collision_check_counter >= 5 and go_mode_active and len(current_path_sequence) > 0
+                        should_check_collision = collision_check_counter >= 10 and go_mode_active and len(current_path_sequence) > 0
                         if should_check_collision:
                             collision_check_counter = 0
                     
