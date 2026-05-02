@@ -16,7 +16,7 @@ DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hyp
 MODEL_MAX_DEPTH: 20           # maximum depth (in meters) that the depth dataset can predict. Hypersim is 20 m.
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
-save_during_flight : False    # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
+save_during_flight : True    # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
@@ -32,7 +32,7 @@ VoxelBlockGrid:
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.
 goal_position_rdf: # from EKF origin
-  - 2 # Right
+  - -2 # Right
   - -1.5   # Down
   - 12     # Forward
 
@@ -47,7 +47,7 @@ planner:
   bounds_margin: 1.5          # extra map margin around start, goal, and observed voxels
   min_window_size: 15         # minimum side length of the planning window in metres
   vertical_half_extent: 0.4   # keep voxels within +/- this down-axis distance from current altitude
-  unknown_traversal_cost: 1.5 # unknown cells stay traversable but are penalized
+  unknown_traversal_cost: 1.0 # unknown cells stay traversable but are penalized
   heading_bins: 10            # discrete heading bins for dstar_lite_primitives
 
 # Drone Settings
