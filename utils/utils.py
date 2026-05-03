@@ -359,7 +359,7 @@ def get_traj_linesets(traj_list):
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, DEBUG=False):
+def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, DEBUG=True):
 
     # Get weights and tsdf values from the voxel block grid
     weights = vbg.attribute("weight").reshape((-1))
@@ -402,36 +402,91 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
 
+    # Guard: if no obstacles detected, treat as clear space (infinite clearance)
+    has_obstacles = len(voxel_coords_numpy) > 0
+    
+    if DEBUG:
+        print(f"[CHOOSE_PRIMITIVE] Voxel count: {len(voxel_coords_numpy)} obstacles detected")
+
     # Initialize scoring variables to evaluate the trajectories
-    max_traj_score = -np.inf # track best trajectory
-    min_goal_score = np.inf # track proximity to goal
-    max_traj_idx = None # track the index of the best trajectory
+    safe_trajectories = []  # collect (traj_idx, nearest_voxel_dist, dst_to_goal)
+    max_traj_score = -np.inf  # track best trajectory (no-goal case)
+    max_traj_idx = None  # track the index of the best trajectory
 
     # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
         traj_lineset_copy = copy.deepcopy(traj_linset)
-        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
-        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        traj_lineset_copy.transform(camera_position)  # transform the lineset (copy) to the camera position
+        pts = np.asarray(traj_lineset_copy.points)  # meters # extract the points from the lineset
+        
+        # Guard: ensure trajectory has points
+        if len(pts) == 0:
+            if DEBUG:
+                print(f"[CHOOSE_PRIMITIVE] Traj {traj_idx}: SKIPPED (no points)")
+            continue
+        
+        # Compute nearest obstacle distance
+        if has_obstacles:
+            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean")  # compute distance between all voxels and trajectory points
+            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)  # extract indices of nearest voxel-point pair
+            nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        else:
+            # No obstacles detected - treat as infinite clearance
+            nearest_voxel_dist = np.inf
+        
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
-                # the trajectory satisfies the dist_threshold; let's compute the goal score
+                # COMPOSITE SCORING: Balance goal proximity and obstacle clearance margin
                 tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
-                if dst_to_goal < min_goal_score:
-                    # we have a trajectory that gets us closer to the goal
-                    # print("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
-                    max_traj_idx = traj_idx
-                    min_goal_score = dst_to_goal
+                safe_trajectories.append((traj_idx, nearest_voxel_dist, dst_to_goal))
+                if DEBUG:
+                    print(f"[CHOOSE_PRIMITIVE] Traj {traj_idx}: SAFE (clearance={nearest_voxel_dist:.2f}m, goal_dist={dst_to_goal:.2f}m)")
             else:
                 # no goal position, choose the index that maximizes distance from the obstacles
                 if max_traj_score < nearest_voxel_dist:
                     # we have found a trajectory that gets us closer to goal
                     max_traj_idx = traj_idx
                     max_traj_score = nearest_voxel_dist
+                if DEBUG:
+                    print(f"[CHOOSE_PRIMITIVE] Traj {traj_idx}: SAFE (clearance={nearest_voxel_dist:.2f}m, no goal)")
+        else:
+            if DEBUG:
+                print(f"[CHOOSE_PRIMITIVE] Traj {traj_idx}: REJECTED (clearance={nearest_voxel_dist:.2f}m < {dist_threshold}m threshold)")
+
+    # If goal exists, apply composite scoring to safe trajectories
+    if goal_position is not None and len(safe_trajectories) > 0:
+        # Normalize goal distances and clearance margins for composite scoring
+        goal_distances = np.array([t[2] for t in safe_trajectories])
+        clearance_margins = np.array([t[1] for t in safe_trajectories])
+        
+        # Normalize to [0, 1] range
+        # Goal: min=0 (at goal), max=max observed distance
+        goal_dist_min = np.min(goal_distances)
+        goal_dist_max = np.max(goal_distances)
+        if goal_dist_max > goal_dist_min:
+            goal_dist_norm = (goal_distances - goal_dist_min) / (goal_dist_max - goal_dist_min)
+        else:
+            goal_dist_norm = np.zeros_like(goal_distances)
+        
+        # Clearance: min=dist_threshold (marginal), max=5.0m (safely clear)
+        clearance_min = dist_threshold
+        clearance_max = 5.0
+        clearance_margin_norm = np.clip((clearance_margins - clearance_min) / (clearance_max - clearance_min), 0, 1)
+        
+        # Composite score: lower is better
+        # Weight goal proximity (0.4) vs clearance margin (0.6) - prioritize safety
+        composite_scores = (goal_dist_norm * 0.4) - (clearance_margin_norm * 0.6)
+        
+        # Select trajectory with minimum composite score
+        best_idx = np.argmin(composite_scores)
+        max_traj_idx = safe_trajectories[best_idx][0]
+        
+        if DEBUG:
+            print(f"[CHOOSE_PRIMITIVE] Selected trajectory {max_traj_idx}: score={composite_scores[best_idx]:.3f}, clearance={clearance_margins[best_idx]:.2f}m, goal_dist={goal_distances[best_idx]:.2f}m, ({len(safe_trajectories)} safe options)")
+            for i, (idx, score) in enumerate(zip([t[0] for t in safe_trajectories], composite_scores)):
+                print(f"  Option {i}: Traj {idx}, score={score:.3f}, clearance={clearance_margins[i]:.2f}m, goal_dist={goal_distances[i]:.2f}m")
 
     return max_traj_idx
 
