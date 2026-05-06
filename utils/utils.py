@@ -1,35 +1,50 @@
-"""
-  __  __                   _   _             
- |  \/  | ___  _ __   ___ | \ | | __ ___   __
- | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
- | |  | | (_) | | | | (_) | |\  | (_| |\ V / 
- |_|  |_|\___/|_| |_|\___/|_| \_|\__,_| \_/  
-Copyright (c) 2023 Nate Simon
-License: MIT
-Authors: Nate Simon and Anirudha Majumdar, Princeton University
-Project Page: https://natesimon.github.io/mononav
+r"""
+    _            _       __  __                   _   _             
+   / \   _ __ __| |_   _|  \/  | ___  _ __   ___ | \ | | __ ___   __
+  / _ \ | '__/ _` | | | | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
+ / ___ \| | | (_| | |_| | |  | | (_) | | | | (_) | |\  | (_| |\ V / 
+/_/   \_\_|  \__,_|\__,_|_|  |_|\___/|_| |_|\___/|_| \_|\__,_| \_/                                                                 
 
-Helper functions for the MonoNav project.
+Helper functions for the Ardu-MonoNav project.
 Functionality should be concentrated here and shared between the scripts.
 
 """
-import time
-import cv2 as cv2
+import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation as Rotation
+from matplotlib import colormaps
 from scipy.spatial import distance
 import os
+import copy
 import open3d as o3d
 import open3d.core as o3c
-import copy
+import math as m
 import yaml, json
+import time
+import queue
 
-# For Craziflie logging
-from cflib.crazyflie.log import LogConfig
-from cflib.crazyflie.syncLogger import SyncLogger
+from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
+import threading                       # For bufferless video capture and pose threading
 
-# For bufferless video capture
-import queue, threading
+DEBUG = True
+depth_scale_scaling = False
+_depth_scale_zoom_factor = 1.0
+
+_pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
+_pose_thread = None
+_pose_thread_hz = 15
+
+_stop_event = threading.Event()
+_pose_ready = threading.Event()   # signals first pose is available
+
+_calibration_resolution = (None, None)
+_calibration_roi = None
+
+def printd(string):
+    """
+    Print debug messages. Use f strings for multiple variables.
+    """
+    if DEBUG:
+        print(f"[mav] {string}", flush=True)
 
 """
 VoxelBlockGrid class (adapted from Open3D) for ease of initialization and integration.
@@ -37,111 +52,203 @@ You can read more about the VoxelBlockGrid here:
 https://www.open3d.org/docs/latest/tutorial/t_reconstruction_system/voxel_block_grid.html
 """
 class VoxelBlockGrid:
-    def __init__(self, depth_scale=1000.0, depth_max=5.0, trunc_voxel_multiplier=8.0, device=o3d.core.Device("CUDA:0")):
+    def __init__(
+        self,
+        depth_scale=1000.0,
+        depth_max=5.0,
+        trunc_voxel_multiplier=1.0,
+        device=o3d.core.Device("CUDA:0"),
+        intrinsic_matrix=None,
+    ):
+        self.device = device
         # Reconstruction Information
-        self.depth_scale = depth_scale
+        if depth_scale_scaling:
+            factor = _update_depth_scale_zoom_factor()
+            self.depth_scale = depth_scale * factor
+            printd(f"Scaling depth_scale. New value: {self.depth_scale}")
+        else:
+            self.depth_scale = depth_scale
         self.depth_max = depth_max
         self.trunc_voxel_multiplier = trunc_voxel_multiplier
-        self.device = device
-        self.camera = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # Kinect Intrinsics (default)
-        self.depth_intrinsic = o3d.core.Tensor(self.camera.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.intrinsic_matrix = None
+        self.depth_intrinsic = None
+        if intrinsic_matrix is not None:
+            self.set_intrinsics(intrinsic_matrix)
 
         # Initialize the VoxelBlockGrid
         self.vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=('tsdf', 'weight', 'color'),
             attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
             attr_channels=(1, 1, 3),
-            voxel_size=3.0 / 64, # this sets the resolution of the voxel grid
+            voxel_size=3.0 / 64,                    # this sets the resolution of the voxel grid
             block_resolution=1,
             block_count=50000,
             device=device)
 
+    def set_intrinsics(self, intrinsic_matrix):
+        self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
+        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+
+    def ensure_intrinsics_for_frame(self, frame_width, frame_height):
+        if self.intrinsic_matrix is None:
+            self.set_intrinsics(get_ideal_intrinsics(frame_width, frame_height))
+
     def integration_step(self, color, depth_numpy, cam_pose):
         # Integration Step (TSDF Fusion)
         depth_numpy = depth_numpy.astype(np.uint16)  # Convert to uint16
+        frame_height, frame_width = depth_numpy.shape[:2]
+        self.ensure_intrinsics_for_frame(frame_width, frame_height)
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
-        extrinsic = o3d.core.Tensor(np.linalg.inv(cam_pose), o3d.core.Dtype.Float64)
+        # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
+        depth_intrinsic_cpu = self.depth_intrinsic.to(o3d.core.Device("CPU:0"))
+        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose))
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth, self.depth_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
+            depth, depth_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic = o3d.core.Tensor(self.camera.intrinsic_matrix, o3d.core.Dtype.Float64)
-        self.vbg.integrate(frustum_block_coords, depth, color, self.depth_intrinsic,
-                       color_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
+        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix)
+        self.vbg.integrate(frustum_block_coords, depth, color, depth_intrinsic_cpu,
+                       color_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
 
 """
 Bufferless VideoCapture, courtesy of Ulrich Stern (https://stackoverflow.com/a/54577746)
 Otherwise, a lag builds up in the video stream.
+
+Use this for USB receivers when using something like an FPV camera
 """
 class VideoCapture:
+        def __init__(self, name):
+                self.cap = cv2.VideoCapture(name)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.q = queue.Queue(maxsize=1)
+                self.last_frame = None
+                t = threading.Thread(target=self._reader)
+                t.daemon = True
+                t.start()
 
-  def __init__(self, name):
-    self.cap = cv2.VideoCapture(name)
-    self.q = queue.Queue()
-    t = threading.Thread(target=self._reader)
-    t.daemon = True
-    t.start()
+        # read frames as soon as they are available, keeping only most recent one
+        def _reader(self):
+                while True:
+                        ret, frame = self.cap.read()
+                        if not ret:
+                                break
+                        self.last_frame = frame
+                        if self.q.full():
+                                try:
+                                        self.q.get_nowait()   # discard previous (unprocessed) frame
+                                except queue.Empty:
+                                        pass
+                        self.q.put_nowait(frame)
 
-  # read frames as soon as they are available, keeping only most recent one
-  def _reader(self):
-    while True:
-      ret, frame = self.cap.read()
-      if not ret:
-        break
-      if not self.q.empty():
-        try:
-          self.q.get_nowait()   # discard previous (unprocessed) frame
-        except queue.Empty:
-          pass
-      self.q.put(frame)
-
-  def read(self):
-    return self.q.get()
+        def read(self, timeout=1.0):
+                try:
+                        return self.q.get(timeout=timeout)
+                except queue.Empty:
+                        if self.last_frame is not None:
+                                return self.last_frame
+                        raise RuntimeError("VideoCapture timeout: no frame available")
 
 """
-Get the global Crazyflie (camera) pose from the logger, convert to the Open3D frame
-Crazyflie frame: (X, Y, Z) is FRONT LEFT UP (FLU)
+Compute depth from an RGB image using DepthAnythingV2
+Returns: depth_numpy (uint16 in mm), depth_colormap (for visualization) if make_colormap is True, otherwise None.
+
+Uncomment the cmap line and the currently commented depth_colormap line and comment out the second depth_colormap line for a nicer colormap but adds a slight overhead
+"""
+# cmap = colormaps.get_cmap('Spectral')
+def compute_depth(frame, depth_model, size, make_colormap=True):
+
+        depth = depth_model.infer_image(frame, size)       # as np ndarray, in meters (float32)
+        depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
+        # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
+        # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
+
+        if make_colormap:
+                depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET)
+                #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
+        else:
+                depth_colormap = None
+
+        return depth, depth_colormap
+
+
+"""
+Convert a goal position from RDF (Right-Down-Front) frame to NED (North-East-Down) frame.
+
+The RDF frame is anchored to the drone's heading at startup (after heading_offset_init() is called).
+The NED frame is the absolute navigation frame from ArduPilot.
+
+Args:
+    goal_right: goal position in RDF right direction (meters)
+    goal_down: goal position in RDF down direction (meters)
+    goal_front: goal position in RDF front direction (meters)
+
+Returns:
+    A tuple (goal_north, goal_east, goal_down) in NED frame
+"""
+def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
+    
+    # Coordinate frame transformation (without rotation):
+    # RDF (right, down, front) -> NED (north, east, down)
+    # right (X_RDF) -> east (Y_NED)
+    # down (Y_RDF) -> down (Z_NED)  
+    # front (Z_RDF) -> north (X_NED)
+    
+    # Apply yaw rotation to account for heading offset.
+    # The heading_offset is the absolute yaw at takeoff.
+    # RDF coordinates are relative to the drone's initial heading,
+    # so we need to rotate them by heading_offset to align with NED.
+    cos_yaw = m.cos(heading_offset)
+    sin_yaw = m.sin(heading_offset)
+    
+    goal_ned_x = goal_front * cos_yaw - goal_right * sin_yaw
+    goal_ned_y = goal_front * sin_yaw + goal_right * cos_yaw
+    
+    return goal_ned_x, goal_ned_y, goal_down
+
+
+def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
+    """
+    Convert a point from NED coordinates back to the RDF frame used internally.
+
+    This is essentially the inverse of rdf_goal_to_ned()
+    """
+    # Reverse the rotation applied in rdf_goal_to_ned by rotating by -heading_offset.
+    cos_yaw = m.cos(heading_offset)
+    sin_yaw = m.sin(heading_offset)
+
+    # Unrotate NED coordinates back to the unrotated RDF orientation
+    goal_front = goal_north * cos_yaw + goal_east * sin_yaw
+    goal_right = -goal_north * sin_yaw + goal_east * cos_yaw
+
+    return goal_right, goal_down, goal_front
+
+
+"""
+Get the global pose from the vehicle, convert to the Open3D frame
+ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
+
+This function assumes the drone was pointing North at initialization. But since this obviously may not be true, we compute a heading offset initially to convert RDF goal position to actual NED frame. This allows us to work with RDF (assumed to be aligned with NED) coordinates internally (for trajectory primitives and visualization) while still commanding the drone in the correct NED frame according to its actual initial heading. 
+
+This doesn't matter in exploration mode. But in goal-directed navigation, this allows us to specify the goal in RDF coordinates relative to the drone's initial heading, and have it correctly transformed to NED for ArduPilot.
 """
-def get_crazyflie_pose(scf, logstate):
-    with SyncLogger(scf, logstate) as logger:
-        for log_entry in logger:
-            data = log_entry[1]
-            _x = data['stateEstimate.x']
-            _y = data['stateEstimate.y']
-            _z = data['stateEstimate.z']
-            _roll = data['stateEstimate.roll']
-            _pitch = data['stateEstimate.pitch']
-            _yaw = data['stateEstimate.yaw']
-            # Convert position from CF to TSDF frame
-            xyz = np.array([-_y, -_z, _x]) # Convert to TSDF frame
-            # Convert rotation from CF to TSDF frame
-            r = Rotation.from_euler('xyz', [_roll, -_pitch, _yaw], degrees=True)
-            R = r.as_matrix()
-            M_change = np.array([[0,-1,0],[0,0,-1],[1,0,0]])
-            R = M_change @ R @ M_change.T
+def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad):
+    # Precompute trigonometric terms for roll, pitch, and yaw
+    sr, cr = m.sin(vehicle_roll_rad), m.cos(vehicle_roll_rad)
+    sp, cp = m.sin(vehicle_pitch_rad), m.cos(vehicle_pitch_rad)
+    sy, cy = m.sin(vehicle_yaw_rad), m.cos(vehicle_yaw_rad)
 
-            # Create a homogeneous matrix
-            Hmtrx = np.hstack((R, xyz.reshape(3,1)))
-            # return camera position
-            return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
+    # NED->EDN (considered as RDF for Open3D) basis reorder
+    pose = np.array([
+        [sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr,  sy*cp,  pos_y],
+        [cp*sr,             cp*cr,             -sp,    pos_z],
+        [cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr,  cy*cp,  pos_x],
+        [0,                 0,                 0,          1]
+    ])
 
-"""
-Compute depth from an RGB image using ZoeDepth
-Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
-"""
-def compute_depth(color, zoe):
-    # Compute depth
-    depth = zoe.infer_pil(color, output_type="tensor")  # as torch tensor
-    depth_numpy = np.asarray(depth) # Convert to numpy array
-    depth_numpy = 1000*depth_numpy # Convert to mm
-    depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
-
-    # Save images and depth array
-    depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
-
-    return depth_numpy, depth_colormap
-
+    return pose
+    
 """
 Load the poses (after navigation, for analysis) from the posedir.
 Returns a list of pose arrays.
@@ -162,19 +269,16 @@ This object is used to visualize the trajectory in Open3D.
 Returns a list of of lineset objects representing the camera's pose.
 """
 def get_poses_lineset(poses):
-    points = []
-    lines = []
-    for pose in poses:
-        position = pose[0:3,3] # meters
-        points.append(position)
-        lines.append([len(points)-1, len(points)])
+    points = np.array([pose[0:3,3] for pose in poses])  # meters, preallocated
+    lines = np.column_stack([np.arange(len(points)-1), np.arange(1, len(points))])
 
     pose_lineset = o3d.geometry.LineSet(
         points=o3d.utility.Vector3dVector(points),
-        lines=o3d.utility.Vector2iVector(lines[:-1]),
+        lines=o3d.utility.Vector2iVector(lines),
     )
     pose_lineset.paint_uniform_color([1, 0, 0]) #optional: change the color here
     return pose_lineset
+
 
 """
 Load the trajectory primitives (before navigation).
@@ -182,19 +286,12 @@ Read a list of motion primitives (trajectories) from a the "trajlib_dir" (trajec
 Returns a list of trajectory objects.
 """
 def get_trajlist(trajlib_dir):
-    # Get the list of files in the directory
-    file_list = os.listdir(trajlib_dir)
-    # Filter only .npz files
-    npz_files = [file for file in file_list if file.endswith('.npz')]
-    # Sort the list of .npz files - important for indexing!
-    sorted_files = sorted(npz_files)
-    # Iterate over the sorted list of .npz files
-    traj_list = []
-    for trajfile in sorted_files:
-        file_path = os.path.join(trajlib_dir, trajfile)
-        traj_list.append(np.load(file_path))
-    
+    # Get the list of sorted .npz files and load them (important for indexing!)
+    traj_list = [np.load(os.path.join(trajlib_dir, f)) 
+                 for f in sorted(os.listdir(trajlib_dir)) 
+                 if f.endswith('.npz')]
     return traj_list
+
 
 """
 Convert the trajectory list into a list of trajectory linesets.
@@ -229,10 +326,7 @@ def get_traj_linesets(traj_list):
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold):
-
-    # Boolean for stopping criteria
-    shouldStop = False
+def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, turn_weight=1.5, repulsion_weight=1.0, fallback_primitive=True, DEBUG=DEBUG):
 
     # Get weights and tsdf values from the voxel block grid
     weights = vbg.attribute("weight").reshape((-1))
@@ -276,87 +370,91 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
 
     # Initialize scoring variables to evaluate the trajectories
-    max_traj_score = -np.inf # track best trajectory
-    min_goal_score = np.inf # track proximity to goal
+    max_traj_score = -np.inf # track best trajectory (goalless mode)
     max_traj_idx = None # track the index of the best trajectory
+    
+    # For goal mode: collect all trajectories so we can balance goal progress,
+    # safety margin, and how aggressively the primitive turns away from straight.
+    goal_mode_trajectories = []  # (traj_idx, nearest_voxel_dist, dst_to_goal, turn_cost)
+    
+    # Guard: check if obstacles exist
+    has_obstacles = len(voxel_coords_numpy) > 0
 
     # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        if nearest_voxel_dist > dist_threshold:
-            # the trajectory meets the dist_threshold criterion
-            if goal_position is not None:
-                # the trajectory satisfies the dist_threshold; let's compute the goal score
-                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
-                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
-                if dst_to_goal < min_goal_score:
-                    # we have a trajectory that gets us closer to the goal
-                    # print("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
-                    max_traj_idx = traj_idx
-                    min_goal_score = dst_to_goal
+        
+        # Guard: if no obstacles detected, treat as infinitely safe
+        if has_obstacles:
+            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+            nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        else:
+            nearest_voxel_dist = np.inf  # No obstacles = infinite clearance
+
+        if goal_position is not None:
+            # Goal mode: collect all trajectories with their metrics
+            tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+            dst_to_goal = np.sqrt(np.min(tmp_to_goal))
+            traj_pts = np.asarray(traj_linset.points)
+            if len(traj_pts) >= 2:
+                end_point = traj_pts[-1]
+                # Penalize primitives that bend sharply away from the current heading.
+                turn_cost = abs(np.arctan2(end_point[0], max(end_point[2], 1e-6)))
             else:
-                # no goal position, choose the index that maximizes distance from the obstacles
+                turn_cost = 0.0
+            goal_mode_trajectories.append((traj_idx, nearest_voxel_dist, dst_to_goal, turn_cost))
+            if DEBUG:
+                print(f"[choose_primitive DEBUG] traj {traj_idx}: nearest_voxel_dist={nearest_voxel_dist:.3f}, dst_to_goal={dst_to_goal:.3f}, turn_cost={turn_cost:.3f}")
+        else:
+            # Goalless mode: maximize distance from obstacles (among safe trajectories)
+            if nearest_voxel_dist > dist_threshold:
                 if max_traj_score < nearest_voxel_dist:
-                    # we have found a trajectory that gets us closer to goal
                     max_traj_idx = traj_idx
                     max_traj_score = nearest_voxel_dist
 
-    if max_traj_idx is None:
-        # No trajectory meets the dist_threshold criterion, crazyflie should stop.
-        shouldStop = True
-    return shouldStop, max_traj_idx
+    # Goal mode: safety-gated composite selection.
+    if goal_position is not None and goal_mode_trajectories:
+        # First pass: find trajectories that clear the safety threshold.
+        safe_trajectories = [t for t in goal_mode_trajectories if t[1] > dist_threshold]
 
+        if safe_trajectories:
+            safe_goal_distances = np.array([t[2] for t in safe_trajectories], dtype=np.float64)
+            safe_clearances = np.array([t[1] for t in safe_trajectories], dtype=np.float64)
+            safe_turn_costs = np.array([t[3] for t in safe_trajectories], dtype=np.float64)
 
-"""
-Upon Crazyflie startup, these helper functions ensure the EKF is properly initialized before takeoff.
-#  Copyright (C) 2018 Bitcraze AB
-Taken from several Crazyflie examples, e.g., https://github.com/bitcraze/crazyflie-lib-python/blob/master/examples/autonomy/autonomous_sequence_high_level.py
-"""
-def reset_estimator(scf):
-    scf.param.set_value('kalman.resetEstimation', '1')
-    time.sleep(0.1)
-    scf.param.set_value('kalman.resetEstimation', '0')
-    
-    print('Waiting for estimator to find position...')
+            # Absolute potential-field scoring:
+            # 1. Goal distance penalty (meters)
+            # 2. Turn penalty (approx 1.5m penalty per radian of lateral deviation by default (see turn_weight))
+            # 3. Repulsion penalty (huge when clearance is near dist_threshold, tapers off)
+            goal_costs = safe_goal_distances
+            turn_costs = turn_weight * safe_turn_costs
+            repulsion_costs = repulsion_weight * (1.0 / (safe_clearances - dist_threshold + 0.1))
 
-    log_config = LogConfig(name='Kalman Variance', period_in_ms=500)
-    log_config.add_variable('kalman.varPX', 'float')
-    log_config.add_variable('kalman.varPY', 'float')
-    log_config.add_variable('kalman.varPZ', 'float')
+            composite_score = goal_costs + turn_costs + repulsion_costs
+            max_traj_idx = safe_trajectories[int(np.argmin(composite_score))][0]
+            if DEBUG:
+                print(f"[choose_primitive DEBUG] safe_goal_distances={safe_goal_distances}")
+                print(f"[choose_primitive DEBUG] safe_clearances={safe_clearances}")
+                print(f"[choose_primitive DEBUG] safe_turn_costs={safe_turn_costs}")
+                print(f"[choose_primitive DEBUG] composite_score={composite_score}")
+                print(f"[choose_primitive DEBUG] chosen traj index: {max_traj_idx}")
+        else:
+            # Fallback: all trajectories below safety threshold
+            if fallback_primitive:
+                # Pick the one with best clearance (original behavior)
+                max_traj_idx = max(goal_mode_trajectories, key=lambda t: t[1])[0]
+                if DEBUG:
+                    print(f"[choose_primitive DEBUG] no safe trajectories, fallback chosen traj index: {max_traj_idx}")
+            else:
+                # Return None to indicate no safe trajectory available
+                if DEBUG:
+                    print(f"[choose_primitive DEBUG] no safe trajectories, fallback disabled, returning None")
+                max_traj_idx = None
 
-    var_y_history = [1000] * 10
-    var_x_history = [1000] * 10
-    var_z_history = [1000] * 10
-
-    threshold = 0.001
-
-    with SyncLogger(scf, log_config) as logger:
-        for log_entry in logger:
-            data = log_entry[1]
-
-            var_x_history.append(data['kalman.varPX'])
-            var_x_history.pop(0)
-            var_y_history.append(data['kalman.varPY'])
-            var_y_history.pop(0)
-            var_z_history.append(data['kalman.varPZ'])
-            var_z_history.pop(0)
-
-            min_x = min(var_x_history)
-            max_x = max(var_x_history)
-            min_y = min(var_y_history)
-            max_y = max(var_y_history)
-            min_z = min(var_z_history)
-            max_z = max(var_z_history)
-
-            if (max_x - min_x) < threshold and (
-                    max_y - min_y) < threshold and (
-                    max_z - min_z) < threshold:
-                break
+    return max_traj_idx
 
 """
 Load config.yml file
@@ -373,23 +471,136 @@ def get_calibration_values(camera_calibration_path):
     # Load the camera calibration file
     with open(camera_calibration_path, "r") as json_file:
         data = json.load(json_file)
-    mtx = np.array(data['CameraMatrix'])
-    dist = np.array(data['DistortionCoefficients'])
-    return mtx, dist
+    mtx = np.array(data['camera_matrix'])
+    dist = np.array(data['dist_coeffs'])
+    opt_mtx = np.array(data['refined_matrix'])
+    roi = np.array(data['roi'])
+    resolution = data.get('resolution', None)
+    if resolution is not None and len(resolution) == 2:
+        _update_depth_scale_zoom_factor(tuple(int(v) for v in resolution), roi)
+    else:
+        _update_depth_scale_zoom_factor(roi=roi)
+    return mtx, dist, opt_mtx, roi
+
+
+def get_calibration_resolution(camera_calibration_path):
+    with open(camera_calibration_path, "r") as json_file:
+        data = json.load(json_file)
+    resolution = data.get("resolution", None)
+    if resolution is None or len(resolution) != 2:
+        return None, None
+    _update_depth_scale_zoom_factor(tuple(int(v) for v in resolution), _calibration_roi)
+    return int(resolution[0]), int(resolution[1])
+
+
+def scale_intrinsics(intrinsic_matrix, scale_x, scale_y):
+    scaled_intrinsic = np.array(intrinsic_matrix, copy=True)
+    scaled_intrinsic[0, 0] *= scale_x
+    scaled_intrinsic[1, 1] *= scale_y
+    scaled_intrinsic[0, 2] *= scale_x
+    scaled_intrinsic[1, 2] *= scale_y
+    return scaled_intrinsic
+
+
+def get_ideal_intrinsics(frame_width, frame_height):
+    """
+    Return a simple pinhole camera matrix for the given frame size.
+
+    This is only used as a fallback when no calibration intrinsics are available.
+    It assumes square pixels, a centered principal point, and a focal length equal
+    to the larger image dimension.
+    """
+    focal_length = float(max(frame_width, frame_height))
+    return np.array(
+        [
+            [focal_length, 0.0, (frame_width - 1) / 2.0],
+            [0.0, focal_length, (frame_height - 1) / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height):
+    """
+    Adjust camera intrinsics and ROI to match the actual frame dimensions.
+    If frame dimensions differ from calibration dimensions, scales the intrinsics accordingly.
+    
+    Args:
+        mtx: Camera matrix
+        dist: Distortion coefficients
+        optimal_mtx: Optimal camera matrix (after undistortion)
+        roi: Region of interest [x, y, w, h]
+        frame_width: Actual frame width
+        frame_height: Actual frame height
+        calib_width: Calibration frame width
+        calib_height: Calibration frame height
+
+    """
+    if calib_width is None or calib_height is None:
+        return mtx, dist, optimal_mtx, roi
+    
+    scale_x = frame_width / calib_width
+    scale_y = frame_height / calib_height
+    
+    # Only scale if dimensions differ significantly
+    if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
+        mtx = scale_intrinsics(mtx, scale_x, scale_y)
+        optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
+        dist = dist.copy()  # Distortion coefficients don't scale with resolution
+        roi = np.array(
+            [
+                int(round(roi[0] * scale_x)),
+                int(round(roi[1] * scale_y)),
+                int(round(roi[2] * scale_x)),
+                int(round(roi[3] * scale_y)),
+            ],
+            dtype=np.int32,
+        )
+    
+    return mtx, dist, optimal_mtx, roi
+
+
+def get_cropped_intrinsics(intrinsic_matrix, roi):
+    cropped_intrinsic = np.array(intrinsic_matrix, copy=True)
+    x, y, _, _ = [int(v) for v in roi]
+    cropped_intrinsic[0, 2] -= x
+    cropped_intrinsic[1, 2] -= y
+    return cropped_intrinsic
 
 """
-Transform the raw image to match the kinect image: dimensions and intrinsics.
-This involves resizing the image, scaling the camera matrix, and undistorting the image.
+Transform the raw image.
+
+This involves resizing the image, scaling the camera matrix, and undistorting
+and cropping the image.  The undistortion step may be bypassed by setting
+``apply_undistort`` to ``False`` (for example when a sensor is already
+rectified or when you want to work with raw frames).
+
+Args:
+    image: Input colour image (numpy array or array-like).
+    mtx: Camera matrix from calibration.
+    dist: Distortion coefficients.
+    optimal_matrix: Optimal camera matrix after undistortion.
+    roi: Region of interest for cropping (x, y, w, h).
+    apply_undistort: If False, the original image is returned (cropped if
+        ``roi`` is not ``None``); no undistortion is performed.
 """
-def transform_image(image, mtx, dist, kinect):
-    if image.shape[0] != kinect.height or image.shape[1] != kinect.width:
-        # Resize the camera matrix to match new dimensions
-        scale_vec = np.array([kinect.width / image.shape[1], kinect.height / image.shape[0], 1]).reshape((3,1))
-        mtx = mtx * scale_vec
-        # Resize image to match the kinect dimensions & new intrinsics
-        image = cv2.resize(image, (kinect.width, kinect.height))
-    # Transform to the kinect camera matrix
-    transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, kinect.intrinsic_matrix)
+def transform_image(image, mtx=None, dist=None, optimal_matrix=None, roi=None, enable_undistort = True, roi_crop = True):
+    transformed_image = image
+    if enable_undistort:
+        if not roi_crop:
+            if roi is not None:
+                x, y, w, h = roi
+                return image[y:y+h, x:x+w]
+            return image
+
+        # cv2 can handle both numpy arrays and other array-like objects efficiently
+        transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
+                                        mtx, dist, None, optimal_matrix)
+        # Crop the image to the ROI
+        x, y, w, h = roi
+        transformed_image = transformed_image[y:y+h, x:x+w]
+
     return transformed_image
 
 """
@@ -397,3 +608,165 @@ Helper function to extract the image frame number from the filename string.
 """
 def split_filename(filename):
     return int(filename.split("-")[-1].split(".")[0])
+
+def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
+    """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
+    try:
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=window_name)
+        vis.add_geometry(pcd_legacy)
+        ctr = vis.get_view_control()
+        # Open3D renamed `get6_axis_aligned_bounding_box` to `get_axis_aligned_bounding_box`.
+        # Use whichever is available for maximum compatibility.
+        get_aabb = getattr(pcd_legacy, 'get_axis_aligned_bounding_box', None)
+        if get_aabb is not None:
+            bounds = get_aabb()
+        else:
+            bounds = pcd_legacy.get6_axis_aligned_bounding_box()
+        center = bounds.get_center()
+        ctr.set_lookat(center)
+        ctr.set_up([0, 0, 1])       # Z up
+        ctr.set_front([0, -1, 0])   # Look along -Y (forward)
+        ctr.set_zoom(1)
+        vis.run()
+        vis.destroy_window()
+    except Exception as e:
+        print(f"[vis] Open3D visualization failed: {e}")
+
+def _pose_thread_worker():
+    """Background thread: stable-rate pose polling with timestamp."""
+    global _pose_latest
+
+    get_pose = mavc.get_pose
+    sleep_time = 1.0 / _pose_thread_hz
+    next_time = time.perf_counter()
+
+    while not _stop_event.is_set():
+        next_time += sleep_time
+
+        # Get pose
+        x, y, z, yaw, pitch, roll = get_pose()
+        t = time.time()
+
+        # Update shared pose
+        _pose_latest = (x, y, z, yaw, pitch, roll)
+
+        # Signal that pose is ready (only matters first time)
+        _pose_ready.set()
+
+        # Maintain stable loop timing
+        sleep = next_time - time.perf_counter()
+        if sleep > 0:
+            time.sleep(sleep)
+        else:
+            next_time = time.perf_counter()
+
+
+def start_pose_thread(frequency_hz):
+    """Start pose thread at given frequency."""
+    global _pose_thread, _pose_thread_hz
+
+    if _pose_thread and _pose_thread.is_alive():
+        print("[INFO] Pose thread already running")
+        return
+
+    _pose_thread_hz = frequency_hz
+    _stop_event.clear()
+    _pose_ready.clear()
+
+    _pose_thread = threading.Thread(target=_pose_thread_worker, daemon=True)
+    _pose_thread.start()
+
+    print(f"[INFO] Pose thread started ({frequency_hz} Hz)")
+
+
+def get_latest_pose():
+    """
+    Blocks until first pose is available, then returns immediately.
+    Returns (t, x, y, z, yaw, pitch, roll)
+    """
+    _pose_ready.wait()   # efficient wait (no CPU burn)
+    return _pose_latest
+
+
+def stop_pose_thread():
+    """Stop pose thread cleanly."""
+    global _pose_thread
+
+    _stop_event.set()
+
+    if _pose_thread and _pose_thread.is_alive():
+        _pose_thread.join(timeout=1.0)
+
+    print("[INFO] Pose thread stopped")
+
+# To send resolution and flip commands to the ESP32-CAM
+def send_esp_cam_commands(ip, vflip, hflip, res_idx):
+    import requests
+    print("Sending commands to ESP32 CAM")
+    def send(var, val):
+        url = f"{ip}/control?var={var}&val={val}"
+        try:
+            r = requests.get(url, timeout=2)
+            if r.status_code == 200:
+                print(f"{var} set to {val}")
+        except Exception as e:
+            print(f"Error setting {var}: {e}")
+
+    # Send commands
+    send("vflip", vflip)
+    send("hmirror", hflip)
+    send("framesize", res_idx)
+
+def yaw_vehicle(yaw_rate):
+    mavc.send_body_offset_ned_vel(0,0,yaw_rate=yaw_rate)
+
+
+def map_traj_idx_to_yaw_rate(traj_idx, amplitudes, fallback_rate=0.3):
+    """Map a trajectory index and amplitude list to a signed yaw rate for in-place spinning.
+
+    Uses the convention in mononav: commanded yaw_rate for left turns is negative.
+    Returns a signed yaw_rate with magnitude `fallback_rate`.
+    """
+    try:
+        amp = amplitudes[int(traj_idx)]
+        sign = -np.sign(amp)
+        if sign == 0:
+            return 0.0
+        return float(sign * abs(fallback_rate))
+    except Exception:
+        return float(fallback_rate)
+
+def _update_depth_scale_zoom_factor(resolution=None, roi=None, correction_factor = 1.0):
+    """
+    Update the global depth-scale zoom factor from calibration/resolution/ROI.
+
+    The factor is computed from the crop zoom only.
+    """
+    global _calibration_resolution, _calibration_roi, _depth_scale_zoom_factor
+
+    if resolution is not None:
+        _calibration_resolution = resolution
+    if roi is not None:
+        _calibration_roi = roi
+
+    width, height = _calibration_resolution
+    if width is None or height is None or _calibration_roi is None:
+        _depth_scale_zoom_factor = 1.0
+        return _depth_scale_zoom_factor
+
+    roi_array = np.asarray(_calibration_roi).reshape(-1)
+    if roi_array.size < 4:
+        _depth_scale_zoom_factor = 1.0
+        return _depth_scale_zoom_factor
+
+    roi_width = float(roi_array[2])
+    roi_height = float(roi_array[3])
+    if roi_width <= 0.0 or roi_height <= 0.0:
+        _depth_scale_zoom_factor = 1.0
+        return _depth_scale_zoom_factor
+
+    zoom_x = float(width) / roi_width
+    zoom_y = float(height) / roi_height
+    _depth_scale_zoom_factor = correction_factor * (zoom_x + zoom_y) / 2.0
+    return _depth_scale_zoom_factor

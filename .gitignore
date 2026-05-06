@@ -1,4 +1,5 @@
 # Project files
+data.7z
 # Ignore everything in the /data/ folder
 /data/*
 # Except the data folder itself
@@ -6,14 +7,16 @@
 # And the demo_hallway folder and its contents
 !/data/demo_hallway/
 /data/demo_hallway/*
-!/data/demo_hallway/crazyflie-poses/
-!/data/demo_hallway/crazyflie-rgb-images/
+!/data/demo_hallway/poses/
+!/data/demo_hallway/rgb-images/
 
-/utils/calibration/calibration_pictures/*
-/utils/calibration/calibration_output/*
-/utils/calibration/flydrone_calibration_pictures/*
-/utils/calibration/output/*
-/utils/calibration/undistort_output/*
+!/data/crazyflie_demo_hallway/
+/data/crazyflie_demo_hallway/*
+!/data/crazyflie_demo_hallway/poses/
+!/data/crazyflie_demo_hallway/rgb-images/
+
+DepthAnythingV2-metric/checkpoints/*
+!DepthAnythingV2-metric/checkpoints/
 
 # Byte-compiled / optimized / DLL files
 cache/*

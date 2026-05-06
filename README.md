@@ -1,184 +1,369 @@
-# MonoNav: MAV Navigation via Monocular<br>Depth Estimation and Reconstruction
-
-**Authors**: [Nathaniel Simon](https://natesimon.github.io/) and [Anirudha Majumdar](https://irom-lab.princeton.edu/majumdar/)
-
-_[Intelligent Robot Motion Lab](https://irom-lab.princeton.edu/), Princeton University_
-
-[Project Page](https://natesimon.github.io/mononav) | [Paper (arXiv)](https://arxiv.org/pdf/2311.14100.pdf) | [Video](https://www.youtube.com/watch?v=msWLSfOmTpI) |
+# ArduMonoNav: MAV Navigation via Monocular Depth Estimation and Reconstruction
 
 ---
 
-MonoNav is a monocular navigation stack that uses RGB images and camera poses to generate a 3D reconstruction, enabling the use of conventional planning techniques. MonoNav leverages pre-trained depth-estimation ([ZoeDepth](https://github.com/isl-org/ZoeDepth)) and off-the-shelf fusion ([Open3D](https://github.com/isl-org/Open3D)) to generate a real-time 3D reconstruction of the environment. At each planning step, MonoNav selects from a library of motion primitives to navigate collision-free towards the goal. While the robot executes each motion primitive, new images and poses are integrated into the reconstruction. In our [paper](https://arxiv.org/pdf/2311.14100.pdf), we demonstrate MonoNav on a 37 gram micro aerial vehicle (MAV) navigating hallways at 0.5 m/s (see [project page](https://natesimon.github.io/mononav) and [video](https://www.youtube.com/watch?v=msWLSfOmTpI)).
+ArduMonoNav is a monocular navigation stack that uses RGB images and camera poses to build a 3D reconstruction, enabling conventional planning techniques on a MAV with only a single camera instead of heavy and expensive setups like LiDAR, stereo cameras or RGB-D cameras. The original [MonoNav](https://github.com/natesimon/MonoNav) pipeline used ZoeDepth on a Crazyflie. This fork adapts the pipeline for an **ArduPilot drone** and replaces the depth estimator with the [metric depth version](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth) of **[Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)**.
+
+At each planning step, ArduMonoNav:
+
+1. receives an RGB frame from the onboard camera,
+2. estimates metric depth with Depth Anything V2,
+3. fuses RGB-D frames and vehicle poses into an Open3D TSDF reconstruction,
+4. scores a library of motion primitives against the reconstruction and goal,
+5. sends the selected primitive as MAVLink velocity/yaw commands, and
+6. repeats until the goal is reached or no safe primitive is available.
+
+This project currently uses an ESP32-CAM sending images at 480x320 over TCP using the ESP32 `CameraWebServer` example code in Arduino.
+
+**Note**: Not tested with fisheye lenses. Possibility of scale mismatch exists as seen when running the [MonoNav](https://github.com/natesimon/MonoNav) out-of-the-box demo with the provided intrinsics. More info given down below in `Demo: out of the Box!` section 
 
 ## Overview
-<img src="utils/reconstruction.gif" height="250px" align="right"/>
+
+This repository contains code to run:
+
+**ArduMonoNav pipeline** ([`mononav.py`](mononav.py)): the integrated real-time navigation loop for an ArduCopter vehicle. It connects over MAVLink, reads an ESP32-style MJPEG camera stream, estimates depth with Depth Anything V2, maintains a TSDF map, chooses motion primitives, and commands the vehicle in `GUIDED` mode.
+
+There are also scripts that break ArduMonoNav into sub-parts for offline experimentation:
+
+1. **Data collection pipeline**: Run [mononav.py](mononav.py) with `FLY_VEHICLE: False` in [config.yml](config.yml) and fly the drone manually (Remember to press 'g' to start the data collection before flying forward). This will save all the data as the online run but the /poses and /rgb-images will be the data to be used by 1.b. below. 
+2. **Depth estimation pipeline** ([`Scripts/estimate_depth.py`](Scripts/estimate_depth.py)): estimate depths from RGB images.
+3. **Fusion pipeline** ([`Scripts/fuse_depth.py`](Scripts/fuse_depth.py)): fuse depth images and camera poses into a 3D reconstruction.
+4. **Simulate ArduMonoNav** ([`Scripts/simulate.py`](Scripts/simulate.py)): step through a reconstruction and visualize the motion primitives chosen by the planner.
 
 
-This repository contains code to run the following:  
-**MonoNav pipeline** ([`mononav_cf.py`](mononav_cf.py)): Monocular hallway navigation using a Crazyflie + FPV camera, as seen in our paper. We encourage you to adapt this script to other vehicles / scenes!
+The repository includes:
 
-We also offer scripts that break MonoNav into sub-parts, which can be run independently & offline:
-1. **Data collection pipeline** ([`collect_dataset.py`](collect_dataset.py)): Collect images and poses from your own camera / robot.
-2. **Depth estimation pipeline** ([`estimate_depth.py`](estimate_depth.py)): Estimate depths from RGB images using ZoeDepth.
-3. **Fusion pipeline** ([`fuse_depth.py`](fuse_depth.py)): Fuse the estimated depth images and camera poses into a 3D reconstruction.
-4. **Simulate MonoNav** ([`simulate.py`](simulate.py)): Step through the 3D reconstruction and visualize the motion primitives chosen by the MonoNav planner. This is a useful way to replay and debug MonoNav trials.
+- [`DepthAnythingV2-metric/`](DepthAnythingV2-metric): [Depth Anything V2 metric-depth] code.
+- [`utils/mavlink_control.py`](utils/mavlink_control.py): MAVLink helpers for ArduCopter.
+- [`utils/generate_primitives.py`](utils/generate_primitives.py): generate and visualize motion primitives.
+- [`utils/calibration/`](utils/calibration): camera calibration helpers and sample intrinsics.
+- [`data/demo_hallway`](data/demo_hallway): a sample dataset for out-of-the-box demo.
+- [`ArduCopter Setup`](ArduCopter_Setup.md): ArduPilot setup notes for the vehicle side.
 
-These scripts (run in sequence) form a demo, which we highly recommend before adapting MonoNav for your system. We include a sample dataset ([`data/demo_hallway`](data/demo_hallway)), so no robot is needed to run the demo!
+## Improvements
 
-In addition, we include the following resources in the `/utils/` directory:
-- [`utils/test_camera.py`](utils/test_camera.py) to test your camera,
-- [`utils/generate_primitives.py`](utils/generate_primitives.py) to generate and visualize new motion primitives,
-- [`utils/calibration/take_pictures.py`](utils/calibration/take_pictures.py) to take pictures of a calibration target,
-- [`utils/calibration/calibrate.py`](utils/calibration/calibrate.py) to calibrate the camera with OpenCV and save the camera intrinsics to file,
-- [`utils/calibration/transform.py`](utils/calibration/transform.py) to test the undistortion and transformation pipeline.
-
-We hope you enjoy MonoNav!
+- DepthAnythingV2 is faster and more accurate than ZoeDepth
+- Automatic intrinsics scaling for any resolution after initial camera calibration so you don't have to recalibrate. Just directly run the code
+- Modified trajectory selection for better navigation. The original [implementation] tried to align the vehicle's heading with the vehicle-goal vector as soon as possible and got stuck if faced with an obstacle. The current implementation moves around obstacles implementing a potential-field repulsion navigation. 
 
 ## Installation and Configuration
 
-Clone the repository and its submodules (ZoeDepth):
-
-```
-git clone --recurse-submodules https://github.com/natesimon/MonoNav.git
-```
-
-Install the dependencies from `environment.yml` using [mamba](https://github.com/mamba-org/mamba) (fastest):
-```bash
-mamba env create -n mononav --file environment.yml
-mamba activate mononav
-```
-or conda : 
+Clone the repository:
 
 ```bash
-conda env create -n mononav --file environment.yml
+git clone https://github.com/GauthamMPrakash/ArduMonoNav
+cd ArduMonoNav
+```
+
+Create the conda environment:
+
+```bash
+conda env create --file environment.yml
 conda activate mononav
 ```
-**Note:** If the installation gets stuck at `Solving environment: ...`, we recommend updating your system, re-installing conda / miniconda, or using mamba.
+
+or with mamba:
+
+```bash
+mamba env create --file environment.yml
+mamba activate mononav
+```
+
+Install/check any extra Depth Anything V2 metric requirements if needed (generally not needed as the previous step already installs required libraries):
+
+```bash
+pip install -r DepthAnythingV2-metric/requirements.txt
+```
 
 **Tested on:** (release / driver / GPU)  
-- Ubuntu 22.04 / NVIDIA 535 / RTX 4090
-- Ubuntu 22.04 / NVIDIA 535 / Titan RTX
-- Ubuntu 20.04 / NVIDIA 530 / Titan Xp
-- Ubuntu 18.04 / NVIDIA 470 / Titan Xp
+- Linux Mint 22.1  / NVIDIA 535 / RTX 3050
+- Linux Mint 22.1  / ----------------- / i3-1125G4 with Intel UHD
 
-If you do not have access to GPU, set `device = "CPU:0"` in `config.yml`. This will reduce the speed of both depth estimation and fusion, and may not be fast enough for real-time operations.
+### Depth Anything V2 Checkpoint
+
+Download a Depth Anything V2 metric checkpoint from [here](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth#pre-trained-models) and place it under:
+
+```text
+DepthAnythingV2-metric/checkpoints/
+```
+
+You will only need either Small or Base
+
+The default [`config.yml`](config.yml) expects:
+
+```yaml
+DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth"
+MODEL_MAX_DEPTH: 20
+INPUT_SIZE: 252
+```
+
+For indoor flight, the Hypersim models are usually the right starting point. Make sure the checkpoint name matches the encoder (`vits`, `vitb`, or `vitl`), because `mononav.py` derives the encoder from the checkpoint filename.
+
+Theoretically, you can use ArduMonoNav outside with the VKITTI 2 dataset checkpoints but this hasn't been tested.
+
+### ArduCopter and Camera Configuration
+
+Read [`ArduCopter Setup`](ArduCopter_Setup.md) before flying. At minimum, you need:
+
+- an ArduPilot-compatible drone,
+- a monocular RGB camera stream,
+- a telemetry link to the ground computer,
+- reliable pose estimation for indoor flight, such as optical flow plus EKF,
+- a rangefinder recommended for altitude/terrain following, and
+- a tuned vehicle that is already safe to fly manually.
+
+If you do not have a discrete GPU, set the VoxelBlockGrid device in `config.yml` to `CPU:0`.
+Setting the aforementioned parameter to None enables automatic device selection. This will only detect the first instances of a GPU and a CPU and the priority order of device selection is GPU:0 > CPU:0
 
 ## Demo: Out of the Box!
 
-We include a demo dataset ([`data/demo_hallway`](data/demo_hallway)) to try MonoNav out of the box - no robot needed! From a series of ([occasionally noisy](data/demo_hallway/crazyflie-rgb-images/crazyflie_frame-000030.rgb.jpg)) images and poses, we will transform the images, estimate depth, and fuse them into a [3D reconstuction](utils/reconstruction.gif).
-1. The dataset includes just RGB images and camera poses from a Crazyflie (see [Hardware](#mononav-hardware)):
-    ```
-    ├── <demo_hallway>
-    │   ├── <crazyflie_poses> # camera poses
-    │   ├── <crazyflie_rgb_images> # raw camera images
-    ```
-1. Set the dataset path in `config.yml`.  By default, `data_dir: 'data/demo_hallway`, but make sure to change this if you want to process your own dataset.
-    ```
-    data_dir: 'data/demo_hallway' # change to whichever directory you want to process
-    ```
-1. To demonstrate ZoeDepth, run `python estimate_depth.py`. This reads in the crazyflie images and transforms them to match the camera intrinsics used in the ZoeDepth training dataset. This is crucial for depth estimation accuracy (see [Calibration](#camera-calibration) for more details). The transformed images are saved in `<kinect_rgb_images>` and used to estimate depth. The estimated depths are saved as numpy arrays and colormaps (for visualization) in `<kinect_depth_images>`. After running, take a look at the resulting images and note the loss of peripheral information as the raw images are undistorted.
-1. To demonstrate fusion, run: `python fuse_depth.py`. This script reads in the (transformed) images, poses, and depths, and integrates them using Open3D's TSDF Fusion. After completion, a reconstruction should be displayed with coordinate frames to mark the camera poses throughout the run. The reconstruction is saved to file as a VoxelBlockGrid (`vbg.npz`) and pointcloud (`pointcloud.ply` - which can be opened using MeshLab).
-1. Next, run `python simulate.py`. This loads the reconstruction (`vbg.npz`) and executes the MonoNav planner. The planner is executed at each of the camera poses, and does the following:
-    1. visualizes (in black) the available motion primitives in the trajectory library (`utils/trajlib`),
-    1. chooses a motion primitive according to the planner: `choose_primitive()` in `utils/utils.py` selects the primitive that makes the most progress towards `goal_position` while remaining `min_dist2obs` from all obstacles in the reconstruction,
-    1. paints the chosen primitive green.
-`simulate.py` is useful for debugging and de-briefing, and also to anticipate how changes in the trajectory library or planner affect performance. For example, by changing `min_dist2obs` in`config.yml`, it is possible to see how increasing/decreasing the distance threshold to obstacles affects planner performance.
+The repository includes a demo_hallway dataset captured by us located at [`data/demo_hallway`](data/demo_hallway):
 
-1. Finally, try changing the motion primitives to see how they affect planner performance! To modify and generate the trajectory library, open `utils/generate_primitives.py`. Try changing `num_trajectories` from `7` to `11`, and run `generate_primitives.py.` This will display the new motion primitives and update the trajectory library. Note that each motion primitive is defined by a set of gentle turns left, right, or straight. An "extension" segment is added to the primitive (but not flown) to encourage foresight in the planner. See our paper for more details. Feel free to re-run `simulate.py` to try out the new primitives!
+```text
+data/demo_hallway/
+├── rgb-images/
+└── poses/
+```
+
+These data were captured using our [hardware](ArduCopter_Setup.md). The defaults in `config.yml` will work.
+
+1. To demonstrate Depth Anything V2 depth estimation, run `python Scripts/estimate_depth.py`. This reads in the RGB images and transforms them to match the camera intrinsics used in the Depth Anything V2 training dataset. This is crucial for depth estimation accuracy (see Camera Calibration for more details). The transformed images are saved in `transform-rgb-images/` and used to estimate depth. The estimated depths are saved as numpy arrays and colormaps (for visualization) in `transform-depth-images/`. After running, take a look at the resulting images and note the loss of peripheral information as the raw images are undistorted.
+
+2. To demonstrate fusion, run: `python Scripts/fuse_depth.py`. This script reads in the (transformed) images, poses, and depths, and integrates them using Open3D's TSDF Fusion. After completion, a reconstruction should be displayed with coordinate frames to mark the camera poses throughout the run. The reconstruction is saved to file as a VoxelBlockGrid (vbg.npz) and pointcloud (pointcloud.ply - which can be opened using MeshLab).
+
+3. Next, run `python Scripts/simulate.py`. This loads the reconstruction (vbg.npz) and executes the ArduMonoNav planner. The planner is executed at each of the camera poses, and does the following:
+
+    (i) visualizes (in black) the available motion primitives in the trajectory library (`utils/trajlib`),
+
+    (ii) chooses a motion primitive according to the planner: `choose_primitive()` in `utils/utils.py` selects the primitive that makes the most progress towards goal_position while remaining min_dist2obs from all obstacles in the reconstruction,
+
+    (iii) paints the chosen primitive green. `simulate.py` is useful for debugging and de-briefing, and also to anticipate how changes in the trajectory library or planner affect performance. For example, by changing `min_dist2obs` in `config.yml`, it is possible to see how increasing/decreasing the distance threshold to obstacles affects planner performance.
+
+4. Finally, try changing the motion primitives to see how they affect planner performance! To modify and generate the trajectory library, open `utils/generate_primitives.py`. Try changing `num_trajectories` from 7 to 11, and run `python utils/generate_primitives.py`. This will display the new motion primitives and update the trajectory library. Note that each motion primitive is defined by a set of gentle turns left, right, or straight. An "extension" segment is added to the primitive (but not flown) to encourage foresight in the planner. See our paper for more details. Feel free to re-run `python Scripts/simulate.py` to try out the new primitives!
 
 The tutorial should result in the additional files added to `data/demo_hallway`:
+
+```text
+<demo_hallway>
+├── <transform-rgb-images>   # images transformed to remove distortion
+├── <transform-depth-images> # estimated depth (.npy for fusion and .jpg for visualization)
+├── vbg.npz / pointcloud.ply # reconstructions generated by fuse_depth.py
 ```
-├── <demo_hallway>
-│   ├── <kinect_rgb_images> # images transformed to match kinect intrinsics
-│   ├── <kinect_depth_images> # estimated depth (.npy for fusion and .jpg for visualization)
-│   ├── vbg.npz / pointcloud.ply # reconstructions generated by fuse_depth.py
+
+**Demo ArduMonoNav on MonoNav Crazyflie dataset**
+
+The repository also includes the original MonoNav demo dataset at [`data/crazyflie_demo_hallway`](data/crazyflie_demo_hallway). 
+For this one to work, you need to scale down the reconstruction sizes by a factor. This is probably due to incorrect intrinsics or a quirk of DepthAnythingV2 when it works on fisheye. Another possibility is that fisheye calibration has to be used instead of the pinhole model currently used in [utils.py](utils/utils.py). The original MonoNav used a simpler pinhole model with the fisheye lens but it has worked there. A quick fix is ot set `depth_scale` to 2750. This number has been found empirically to be 2x the averga zoom factor on either axes after the cropping.
+We have implemented a scaling code in utils.py to scale down the image because of the zooming effect caused by heavy cropping after undistortion. To enable this, set `depth_scale_scaling = True` in line 29 of utils.py. But we have found empirically, that it is still off by a factor of 2 as mentioned above. So you also need to set `_depth_scale_zoom_factor = 2.0`
+
+Also set `camera_calibration_path: 'utils/calibration/cf_demo_intrinsics.json'` and use the original `goal_position_rdf` of (10m, -1m, -10m)
+
+It contains RGB images and poses:
+
+```text
+data/crazyflie_demo_hallway/
+├── rgb-images/
+└── poses/
 ```
-If you are unable to execute the full tutorial but want to reference the output, you can download it from [Google Drive](https://drive.google.com/file/d/1r9KgkOoOsSP_7FARzuB4NcOaF94TS1HF/view?usp=sharing). If you have made it through the tutorials, you can try MonoNav on your own dataset!
 
-## Collect your own Dataset
+A demo snippet from the original repo:
 
-To run MonoNav on your own dataset, there are two crucial steps:
-1. Collect your own dataset (RGB images and poses). We provide [`collect_dataset.py`](collect_dataset.py) which works for the Crazyflie, but you may have to modify it for your system. Ensure that you are transforming the pose (rotation + translation) into the Open3D frame correctly, and saving it in homogeneous form. See `get_crazyflie_pose` in `utils/utils.py` for reference. Make sure to update `data_dir` in `config.yml` to point to your collected dataset.
-2. Provide the camera intrinsics. This is crucial for the image transformation step and can affect depth estimation quality dramatically. We recommend that you follow our provided calibration sequence to automatically generate a `.json` of camera intrinsics and distortion coefficients. `config.yml` should then be updated to point to the intrinsics json file path: `camera_calibration_path: 'utils/calibration/intrinsics.json'`.
+<img src="utils/reconstruction.gif" height="250px" alt="reconstruction animation"/>
 
-With those steps complete, you can run `estimate_depth.py`, `fuse_depth.py`, and `simulate.py` to reconstruct and try MonoNav on your own dataset!
+## Running ArduMonoNav
+
+The integrated ArduCopter pipeline writes live-flight data using:
+
+```text
+data/mononav-<timestamp>/
+├── rgb-images/
+├── poses/
+├── transform-rgb-images/
+├── transform-depth-images/
+├── trajectories.csv
+└── vbg.npz
+```
+
+The offline scripts are useful for debugging a saved run. The real-time [`mononav.py`](mononav.py) script is the primary entry point for this ArduCopter version.
+
+Before running, confirm:
+
+1. the vehicle is configured and test-flown using ArduPilot,
+2. `config.yml` has the correct MAVLink connection string and camera stream URL,
+3. the Depth Anything V2 checkpoint exists at `DA2_CHECKPOINT`,
+4. camera calibration is correct, or `enable_undistort` is set appropriately,
+5. the motion primitive library exists in [`utils/trajlib`](utils/trajlib), and
+6. you can stop/land the vehicle safely from an RC transmitter or ground station.
+
+**Note:** Use an **integer** number for `camera_src` in config.yml for USB-interfaced feeds like FPV camera receivers.
+
+`camera_src: 0`
+
+Start the integrated pipeline:
+
+```bash
+python mononav.py
+```
+
+The script connects to the drone, sets the EKF origin, starts the camera/depth/fusion loop, and switches to `GUIDED` when flight is enabled. Set:
+
+```yaml
+FLY_VEHICLE: False
+```
+
+to test the perception and planning loop without arming/taking off.
+
+### Keyboard Controls
+
+During flight:
+
+```text
+g: enable MonoNav autonomous mode
+a: manually fly left primitive
+w: manually fly straight primitive
+d: manually fly right primitive
+q: yaw left
+e: yaw right
+f: fuse current frame without moving
+c: brake and land
+r: switch to SMART_RTL
+p: emergency stop (Motors will stop and drone will crash! Only use in case of an emergency)
+```
+
+Manual primitive control is useful for checking that camera poses, depth, and reconstruction are sensible before enabling autonomous mode. Start in a controlled environment and keep a human pilot ready to take over.
+
+Currently the planner treats unseen space as free so while using narrow field of view cameras, the fusion pipeline can only see a few meters in front. Therefore it will start turning right into an obstacle to the unseen sides if the goal specified falls in that direction and the vbg integration for the newly viewd areas don't occur fast enough. Therefore, it is recommended to start the vehicle a few meters behind.
+
+## Planning and Reconstruction
+
+MonoNav plans over a trajectory library stored in [`utils/trajlib`](utils/trajlib). Each primitive is checked against the Open3D TSDF reconstruction. The planner in [`utils/utils.py`](utils/utils.py) selects a primitive that satisfies `min_dist2obs` and, when `goal_position_rdf` is configured, makes progress toward the goal.
+
+Important planning settings in [`config.yml`](config.yml):
+
+```yaml
+goal_position_rdf:
+  - 1
+  - -1.5
+  - 7
+min_dist2obs: 0.7
+min_dist2goal: 0.7
+forward_speed: 0.5
+traj_period: None
+filterYvals: True
+filterWeights: True
+filterTSDF: True
+weight_threshold: 3
+```
+Goal position is given in local coordinates aligned with the heading of the drone at the arming point.
+
+Note: Currently, the 'down' value in goal_position_rdf is unused other than for checking if the drone reached its goal. The project currently does not implement 3D control so keep this value close to the takeoff altitude.
+
+Comment out the goal position lines for undirected exploration where the planner picks the trajectory with the most clearnace from obstacles.
+
+To regenerate primitives:
+
+```bash
+python utils/generate_primitives.py
+```
+
+Inspect [`utils/trajlib/visualization.png`](utils/trajlib/visualization.png) or run the offline simulator on a saved reconstruction to see how changes affect the planner.
 
 ## Camera Calibration
-A key aspect to MonoNav is using a pre-trained depth estimation network on a different camera than the one used during training. The micro FPV camera ([Wolfwhoop WT05](https://a.co/d/bhTwelB)) that we use has significant barrel distortion (fish-eye), and thus the images must be first undistorted to better match the camera intrinsics used to collect the training data.  To maintain the metric depth estimation accuracy of the model, we must transform the input image to match the intrinsics of the training dataset. ZoeDepth is trained on [NYU-Depth-v2](https://cs.nyu.edu/~silberman/datasets/nyu_depth_v2.html), which used the Microsoft [Kinect](https://en.wikipedia.org/wiki/Kinect).
 
-The `transform_image()` function in `utils/utils.py` performs the transformation: resizing the image and undistorting it to match the Kinect's intrinsics.
+Metric depth and TSDF fusion are sensitive to camera intrinsics. Use [`utils/calibration/intrinsics.json`](utils/calibration/intrinsics.json) as a template, but calibrate your own camera whenever possible.
 
-In `utils/calibration`, we provide scripts to generate `intrinsics.json` for your own camera. Steps to calibrate:
+**Note: Unless you are using a lens with noticeable distortion, you need not calibrate the camera and set `enable_undistort` to False.**
 
-1. Make a chessboard calibration target. 
-1. `take_pictures.py`: Take many pictures (recommended: 80+) of the chessboard by pressing the spacebar. Saves them to `utils/calibration/calibration_pictures/`.
-1. `calibrate.py`: Based on the [OpenCV sample](https://github.com/opencv/opencv/blob/4.x/samples/python/calibrate.py).You need to provide several arguments, including the structure and dimensions of your chessboard target. Example:
-    ```
-    MonoNav/utils/calibration$ python calibrate.py -w 6 -h 8 -t chessboard --square_size=35 ./calibration_pictures/frame*.jpg
+This repository currently includes:
 
-    ```
-    The intrinsics are printed and saved to `utils/calibration/intrinsics.json`.
-1. `transform.py`: This script loads the intrinsics from `intrinsics.json` and transforms your `calibration_pictures` to the Kinect's dimensions (640x480) and intrinsics. This operation may involve resizing your image. The transformed images are saved in `utils/calibration/transform_output` and should be inspected.
-1. Finally, we recommend re-running calibration on `transform_output` to ensure that the intrinsics match the Kinect.
-    ```
-    MonoNav/utils/calibration$ python calibrate.py -w 6 -h 8 -t chessboard --square_size=35 ./transform_output/frame*.jpg
+- [`utils/calibration/calibration.py`](utils/calibration/calibration.py) -> Obtain intrinsic matrix using OpenCV calibration
+- [`utils/calibration/charuco_board.png`](utils/calibration/charuco_board.png) -> Board to calibrate camera
+- [`utils/calibration/intrinsics.json`](utils/calibration/intrinsics.json) -> Intrinsics saved here
+- [`utils/calibration/cube.py`](utils/calibration/cube.py) -> To test distortion correction
 
-    ```
-    `transform.py` will save the intrinsics of the transformed images to `check_intrinsics.json`, which should roughly match those of the Kinect:
-    ```
-    [[525.    0.  319.5]
-    [  0.  525.  239.5]
-    [  0.    0.    1. ]]
-    ```
-    
-## MonoNav: Hardware
-To run MonoNav as shown in our paper, you need a monocular robot with pose (position & orientation) estimation. We used the [Crazyflie 2.1](https://www.bitcraze.io/products/crazyflie-2-1/) micro aerial vehicle modified with an FPV camera. Our hardware setup follows closely the one used in Princeton's [Introduction to Robotics](https://irom-lab.princeton.edu/intro-to-robotics/) course. If you are using the Crazyflie, we recommend that you follow the [Bitcraze tutorials](https://www.bitcraze.io/documentation/tutorials/getting-started-with-crazyflie-2-x/) to ensure that the vehicle flies and commmunicates properly.
+Either print or use a fullscreen image of the ChAruCo board on screen. 
 
-**List of parts:**
-- [Crazyflie 2.1](https://www.bitcraze.io/products/crazyflie-2-1/) micro aerial vehicle,
-- [Flowdeck v2](https://www.bitcraze.io/products/flow-deck-v2/) for position and velocity estimation (pose),
-- 5.8 GHz micro FPV camera (e.g., [Wolfwhoop WT05](https://a.co/d/bhTwelB)),
-- Custom PCB with [long pins](https://store.bitcraze.io/collections/spare-parts-crazyflie-2-0/products/male-long-deck-connector), to attach the camera to the Crazyflie,
-- [Crazyradio PA](https://store.bitcraze.io/collections/kits/products/crazyradio-pa) for communication with the vehicle,
-- 5.8 GHz video receiver (e.g., [Skydroid](https://a.co/d/9lO7Md8)).
+Change these parameters in the calibration.py code:\
+`SQUARES_X, SQUARES_Y = 10, 7` -> defines number of inner squares in the ChAruCo. 10x7 ChAruCo actually has 11x8 sqaures\
+`SQUARE_LENGTH, MARKER_LENGTH = 0.0235, 0.0175` -> square length and breadth in meters\
+`URL = "http://192.168.53.56:81/stream"` -> URL of the camera stream. Use an integer number for USB-interfaced feeds\
+\
+Set the calibration path in `config.yml`:
 
-## Running `mononav_cf.py`
-
-The `mononav_cf.py` ("cf" for "crazyflie") script performs the image transformation, depth estimation, fusion, and planning process simultaneously for goal-directed obstacle avoidance. If `FLY_CRAZYFLIE: True`, the Crazyflie will takeoff, if `False`, the pipeline will execute without the Crazyflie starting its motors (useful for testing).
-
-After takeoff, the Crazyflie can be controlled manually by the following key commands:
-```
-w: choose MIDDLE primitive (typically FORWARD)
-a: choose FIRST primitive (typically LEFT)
-d: choose LAST primitive (typically RIGHT)
-c: end control (stop and land)
-q: end control immediately (EMERGENCY stop and land)
-g: start MonoNav
+```yaml
+camera_calibration_path: "utils/calibration/intrinsics.json"
+enable_undistort: True
 ```
 
-Manual control is an excellent way to check that the pipeline is working, as it should produce a sensible reconstruction after landing. As mentioned in the paper, it is HIGHLY RECOMMENDED to manually fly forward 3x (press `w, w, w`) before starting MonoNav (press `g`). This is due to the narrow field of view of the transformed images, which discards peripheral information; to make an informed decision, the planner needs information collected 3 primitives ago.
+If your lens has strong distortion, enabling undistortion can improve depth quality, but it changes the image crop and field of view. The code will usually handle this but check transformed images before flight.
 
-After MonoNav is started, the Crazyflie will choose and execute primitives according to the planner. If collision seems imminent, you can manually choose a primitive (by `w, a, d`) or stop the planner (`c` or `q`). During the run, a `crazyflie_trajectories.csv` log is produced, which includes the `frame_number` and `time_elapsed` during replanning, as well as the `chosen_traj_idx`. 
+**The code automatically rescales the intrinsics for any input resolution after an initial calibration of the camera**
+
+## Important Tuning Before Successful Runs
+
+- Fly the drone to a goal straight ahead
+- Land and check the reconstruction. It should be like the images shown below. Anything too sparse may lead to crashed into walls and anything too dense will be noisy. It's better to be slighly on the sparser side.
+- You can tune the density of the reconstruction by changing these variables in config.yml
+
+  **Depth Model settings**\
+    `INPUT_SIZE: 252`    -> DepthAnythingV2 scales the smaller dimension of the input image to this size while also correspondingly resizing the longer dimension to maintain aspect ratio. Higher values take more compute. Ensure this is a multiple of 14 not exceeding the smaller dimension of the input image
+    `DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth"`   -> We find that the Small model leads to denser depth maps which could be due to faster processing and more integrations for a given scene.
+
+  **Reconstruction settings**\
+    `weight_threshold: 3`     # determines the weight threshold for filtering (higher threshold -> fewer points)
+  
+- After the above steps are completed and if you observe the drone tends to crash into walls or does not move towards the goal even while in open space, try tuning the `min_dist2obs` parameter and the motion primitive "foresight" extension defined as `traj_extension` [generate_primitives.py](utils/generate_primitives.py)\
+The drone will choose the trajectory which gets it closer to goal while prioritising obstacle clearance. An "obstacle" here refers to any occupied voxel. `min_dist2obs` is the "bubble" (safety radius) around each point on the motion primitive. In goalless mode, primitives with points inside these bubbles are discarded. In goal-seeking mode, primitives are safety-gated by this threshold, and among safe trajectories, the planner balances goal progress, turn aggressiveness, and clearance margin. If no safe trajectories exist, the planner falls back to the primitive with the best clearance.
+
+**Tuning the primitive chooser**
+
+- If the planner keeps picking the same straight primitive and ignores the goal, lower the repulsion term or increase the goal weight.
+- If it starts making awkward aggressive turns, increase the turn weight above 1.5.
+- If it feels too cautious and never changes behavior across goals, 1.5 is probably too small compared with the obstacle repulsion term.
+- **Fallback behavior**: If all trajectories violate the safety threshold, the planner enters fallback mode and selects the primitive with the best (least bad) clearance. This prevents the drone from getting stuck, but may result in high-risk maneuvers if `min_dist2obs` is too large relative to the environment. This fallback behaviour should probably not be used and reliability has to be improved by tuning other parameters instead.
+
+- It is better to tune the drone's yaw acceleration to ensure it can hit the most extreme motion primitives in the required time period. This [script](tests/fly_primitives.py) might be helpful to evaluate the flight
+
+## Additional Notes and Safety
+
+- This project does not sync the image frames with pose data. This might be required if you plan on flying at higher speeds. 
+- In this project, we connected both the ESP32-CAM and the Dronebridge ESP32 to the ground station PC set up as a hotspot or by connecting them to a router to which the GCS is also connected.
+- Keep the camera fairly pointed straight. Slight deviations do not matter! But it may be necessary to perform a camera-IMU calibration for better reconstruction especially when using angled cameras.
+- A point of failure for the depth estimation is sudden changes in lighting which take place before the camera has time to adjust the exposure which can throw off the model's estimation resulting in false obstacles appearing in front.
+
+- **The code does not send heartbeats at regular intervals so you need to connect a GCS software like MissionPlanner or QGroundControl connected to the vehicle. Make sure to only run the code after connecting the GCS otherwise the GCS will override the parameter stream rates. It is better to disable GCS controlled parameter stream rates anyway to avoid congestion.**
+
+- **In MP, the stream rates are found in Planner tab in Config. Set them to 0 or -1 (controlled by vehicle). In QGC, go to Settings -> Telemetry -> Stream Rates -> Enable "Controlled By vehicle"**
+
+- **Highly recommend to have an RC or a joystick interfaced via a GCS software like MissionPlanner or QGroundControl to quickly switch modes to land or perform emergency stops in case the code crashes**
+
+## ArduPilot BendyRuler Approach
+
+[AP_ObstacleAvoidance.py](AP_ObstacleAvoidance.py) was developed to use monocular depth estimation as a substitute for a Realsense RGB-D camera but BendyRuler does not appear to be working. It is a modified version of the [d4xx_to_mavlink.py](https://github.com/thien94/vision_to_mavros/blob/master/scripts/d4xx_to_mavlink.py) script. Refer https://ardupilot.org/copter/docs/common-oa-bendyruler.html
+
+We did however test that the OBSTACLE_DISTANCE MavLink message works for the now deprecated (but available to be built into [custom ArduPilot firmwares](https://custom.ardupilot.org/)) simple obstacle avoidance in Stop mode.
+
+## Useful Test Scripts
+
+The [`tests/`](tests) directory contains practical hardware checks:
+
+- [`tests/fly_primitives.py`](tests/fly_primitives.py): command individual motion primitives.
+- [`tests/run_camera_stream_depth.py`](tests/run_camera_stream_depth.py): test camera stream plus Depth Anything V2 inference.
+- [`tests/keyboard_ctrl.py`](tests/keyboard_ctrl.py): A fun script for keyboard teleoperation through MAVLink.
+- [`tests/udp_cam_da2.py`](tests/udp_cam_da2.py): Depth Anything V2 stream test over UDP. Not used currently.
+
+Run these in a safe setup before attempting autonomous flight.
+
+[`utils/mavlink_control.py`](utils/mavlink_control.py) has a `test()` function you can modify and run as a standalone script to verify telemetry functionality. Ensure you have a fully tuned and configured drone and perform any flight tests safely.
 
 ## Future Work
 
-MonoNav is a "work in progress" - there are many exciting directions for future work! If you find any bugs or implement any exciting features, please submit a pull request as we'd love to continue improving the system. Once you get MonoNav running on your robot, send us a video! We'd love to see it.
+ArduMonoNav remains a work in progress. Useful directions include:
 
-**Areas of future work in the pipeline:** 
-- Run MonoNav on new platforms and in new settings!
-- Integrate with ROS for easier interoperability on new systems.
-- Integrate improved depth estimation pipelines, which might take in multiple frames or metadata to improve the depth estimate.
-- Improve the planner to treat space as unsafe UNTIL explored, which could prevent crashes into occluded obstacles. (The current planner treats unseen space as free.)
-- Improve the motion primitive control from open-loop to closed-loop, for more reliable and accurate primitive tracking.
-
-## Citation
-```
-@inproceedings{simon2023mononav,
-  author    = {Nathaniel Simon and Anirudha Majumdar},
-  title     = {{MonoNav: MAV Navigation via Monocular Depth Estimation and Reconstruction}},
-  booktitle = {Symposium on Experimental Robotics (ISER)},
-  year      = {2023},
-  url       = {https://arxiv.org/abs/2311.14100}
-}
-```
-
+- Improving planner conservatism in unseen space. Currently, the planner treats unseen space as open so it may make decisions to go into those areas before the actual obstacles there will be detected. 
+- Limit frequency of the main loop so that everyone can potentially obtain similar results without twiddling with the settings mentioned [here](README.md#important-tuning-before-successful-runs)         
+- Implement a global planner like D*-Lite or RRT* and use ArduPilot's waypoint navigation which is probably more efficient. The current depth map can be constantly evaluated to see if there's an obstacle in front of the vehicle instead of checking the VoxelBlockGrid and a replanning can be triggered.
+- If using motion primitives, it may be better to add a stop and yaw primitive instead of having a constant forward velocity always.
+- Adding ROS/ROS 2 interoperability 
+- Evaluating newer, better monocular metric-depth models
+- Using SLAM pipeline for localization using camera only, so that we can neglect an optical flow sensor (DepthAnything3 seems like it does both SLAM and monocular depth estimation while also being very heavy in terms of computation)

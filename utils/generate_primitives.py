@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -22,15 +22,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Trajectory Constants
-T = 1.0 # s, period of the primitive
-V = 0.5 # m/s, forward speed
-max_yawrate = 0.7 # rad/s
-num_trajectories = 7 # number of trajectories should be ODD (e.g., 11) to ensure a straight line is included
-num_commands = 65 # number of points in the trajectory
-num_points = 8 # how many points should be in each primitive and each extension segment? (for primitive evaluation)
+T = 1.0                         # s, period of the primitive
+V = 0.5                         # m/s, forward speed
+traj_foresight = 1.5            # m, how far should the extension segment be?
+max_yawrate = 0.7               # rad/s
+num_trajectories = 7            # number of trajectories should be ODD (e.g., 11) to ensure a straight line is included
+num_commands = 64               # number of points in the trajectory
+num_points = 8                  # how many points should be in each primitive and each extension segment? (for primitive evaluation)
 
 # Extension segment - straight line at the end of the trajectory (to encourage foresight)
-x_ext = np.linspace(0., 1.0, num_points) # extension segment in the body frame (x = forward)
+x_ext = np.linspace(0., traj_foresight, num_points) # extension segment in the body frame (x = forward)
 y_ext = np.zeros_like(x_ext)
 ext = np.vstack((x_ext, y_ext))
 

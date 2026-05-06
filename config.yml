@@ -1,41 +1,65 @@
 # Directory Settings
 data_dir: 'data/demo_hallway'
-save_dir_prefix: 'data/mononav-'
-# Camera Settings
-camera_num: 0 # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
-camera_source: 'crazyflie' # used for naming files
-camera_calibration_path: 'utils/calibration/demo_intrinsics.json' # camera calibration file (for undistortion)
+trajlib_dir: "utils/trajlib/"                                # where to save & retrieve the trajectory library (motion primitives)
 
-# ZoeDepth Settings
-zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
-num_prezoe_frames: 5 # how many times to run ZoeDepth before starting (the first few inferences are much slower)
+# Camera Settings
+camera_calibration_path: 'utils/calibration/demo_intrinsics.json' # camera calibration file (for undistortion)
+enable_undistort: True                                       # whether to apply undistortion to RGB images      
+camera_src: 'http://192.168.5.56:81/stream'                  # IP address/source of the camera stream. Update with your camera's IP address.      
+
+# Depth Model settings
+INPUT_SIZE: 252               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
+MODEL_MAX_DEPTH: 20           # maximum depth (in meters) that the depth dataset can predict. Hypersim is 20 m.
+depth_map_enable: True        # whether to visualize the depth map during flight. Else just shows RGB frame
+
+enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
+save_during_flight : True     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
-filterYvals: True #this helps filter out the ground / ceiling (for planar navigation)
-filterWeights: True # this helps filter out low-weight voxels
+filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
+filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3. # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.0         # determines the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
-  depth_scale: 1000.0 # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 7.0 # max depth to include in the reconstruction
+  depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
+  depth_max: 7.0              # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
-  device: "CUDA:0" # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
+  device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
-# Planning Settings
-trajlib_dir: 'utils/trajlib/' # where to save & retrieve the trajectory library (motion primitives)
-# comment out goal position for undirected exploration
-goal_position: # goal position in meters
- - -10.0 # +X RIGHT
- - -1.0 # +Y DOWN (HEIGHT)
- -  10.0 # +Z FORWARD
-min_dist2obs: 0.5 # minimum acceptable distance from obstacles, meters (for primitive selection)
-min_dist2goal: 1.0 # termination condition for reaching the goal, meters
+# Goal position in RDF frame (metres). 
+# Comment out for undirected exploration.
+goal_position_rdf: # from EKF origin
+  - 3      # Right
+  - -1.5   # Down
+  - 12     # Forward
 
+# Planner settings
+min_dist2obs: 0.7             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2goal: 0.7            # termination condition for reaching the goal, meters
+turn_weight: 1.5              # higher values favor straighter primitives more strongly
+repulsion_weight: 1.0         # lower this to make obstacle clearance matter less in goal-mode scoring
+fallback_primitive: False     # if True, the vehicle will fly the least bad trajectory available even if the computation indicates it's risky. Setting to True can lead to a  
+                              # crash if the drone is surrounded by obstacles and no actual safe primitive exists but setting it to false can lead to the drone getting
+                              # stuck and not moving at all until a safe primitive appears. Use with caution and consider tuning min_dist2obs if you set this to False.
 
-# Crazyflie Settings
-radio_uri: 'radio://0/4/2M/E7E7E7E7E7' # update the drone ID# to match your vehicle, check using cfclient
-height: 1.0 # crazyflie flight altitude, meters
-FLY_CRAZYFLIE: True # whether to actually fly the crazyflie
-# Control gain settings (TUNED FOR CRAZYFLIE)
-yvel_gain: 0.015 # yvel =  -yawrate*yvel_gain
-yawrate_gain: 1.25 # yawrate = yawrate*yawrate_gain
+# Drone Settings
+# --------------
+# radio_uri: 'radio://0/4/2M/E7E7E7E7E7' # update the drone ID# to match your vehicle, check using cfclient
+
+# IP and port of the telemetry module on the drone. Set appropriate connection strings.
+# Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
+IP: "udpout:192.168.5.51:14550" 
+baud: 115200                  # Set baud, only required for serial telemetry
+height: 1.2                   # flight altitude, meters
+EKF_LAT: 8.4723591
+EKF_LON: 76.9295203
+forward_speed: 0.5            # forward speed in m/s, set to None to use speed defined in generate_primitives.py
+traj_period: None             # period (in seconds) to fly a motion primitive. Set to None for default behaviour of period as defined in generate_primitives.py
+                              # Reducing it may improve performance
+
+# Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
+yvel_gain: 0                  # yvel =  yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
+yawrate_gain: 1               # yawrate = yawrate*yawrate_gain. A simple open-loop gain to apply before the autopilot control loop
+
+FLY_VEHICLE: True             # whether to actually fly the drone
