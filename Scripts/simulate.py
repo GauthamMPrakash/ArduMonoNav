@@ -22,7 +22,7 @@ and trajectory library affect the planning performance. Specify
 
 data_dir = ""   # example to specify a data dir: data_dir = "data/demo_hallway" 
                 # if left empty, the latest run (file modification date) in with the prefix specified in config.yml will be used
-n = 5           # iterate over every n poses
+n = 2           # iterate over every n poses
 
 import os
 import open3d as o3d

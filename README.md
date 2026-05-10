@@ -25,7 +25,7 @@ This repository contains code to run:
 
 There are also scripts that break ArduMonoNav into sub-parts for offline experimentation:
 
-1. **Data collection pipeline**: Run [mononav.py](mononav.py) with `FLY_VEHICLE: False` in [config.yml](config.yml) and fly the drone manually (Remember to press 'g' to start the data collection before flying forward). This will save all the data as the online run but the /poses and /rgb-images will be the data to be used by 1.b. below. 
+1. **Data collection pipeline**: Run [mononav.py](mononav.py) with `FLY_VEHICLE: False` in [config.yml](config.yml) and fly the drone manually (Remember to press 'g' to start the data collection before flying forward). This will save all the data as the online run but the /poses and /rgb-images will be the data to be used by the step below.
 2. **Depth estimation pipeline** ([`Scripts/estimate_depth.py`](Scripts/estimate_depth.py)): estimate depths from RGB images.
 3. **Fusion pipeline** ([`Scripts/fuse_depth.py`](Scripts/fuse_depth.py)): fuse depth images and camera poses into a 3D reconstruction.
 4. **Simulate ArduMonoNav** ([`Scripts/simulate.py`](Scripts/simulate.py)): step through a reconstruction and visualize the motion primitives chosen by the planner.
@@ -103,7 +103,7 @@ Theoretically, you can use ArduMonoNav outside with the VKITTI 2 dataset checkpo
 
 ### ArduCopter and Camera Configuration
 
-Read [`ArduCopter Setup`](ArduCopter_Setup.md) before flying. At minimum, you need:
+Read [`ArduCopter Setup`](ArduCopter_Setup.md) for ArduPilot vehicle configuration and setup before flying. At minimum, you need:
 
 - an ArduPilot-compatible drone,
 - a monocular RGB camera stream,
@@ -153,7 +153,7 @@ The tutorial should result in the additional files added to `data/demo_hallway`:
 **Demo ArduMonoNav on MonoNav Crazyflie dataset**
 
 The repository also includes the original MonoNav demo dataset at [`data/crazyflie_demo_hallway`](data/crazyflie_demo_hallway). 
-For this one to work, you need to scale down the reconstruction sizes by a factor. This is probably due to incorrect intrinsics or a quirk of DepthAnythingV2 when it works on fisheye. Another possibility is that fisheye calibration has to be used instead of the pinhole model currently used in [utils.py](utils/utils.py). The original MonoNav used a simpler pinhole model with the fisheye lens but it has worked there. A quick fix is ot set `depth_scale` to 2750. This number has been found empirically to be 2x the averga zoom factor on either axes after the cropping.
+For this one to work, you need to scale down the reconstruction sizes by a factor. This is probably due to incorrect intrinsics or a quirk of DepthAnythingV2 when it works on fisheye. Another possibility is that fisheye calibration has to be used instead of the pinhole model currently used in [utils.py](utils/utils.py). The original MonoNav used a simpler pinhole model with the fisheye lens but it has worked there. A quick fix is to set `depth_scale` to 2750. This number has been found empirically to be 2x the averga zoom factor on either axes after the cropping.
 We have implemented a scaling code in utils.py to scale down the image because of the zooming effect caused by heavy cropping after undistortion. To enable this, set `depth_scale_scaling = True` in line 29 of utils.py. But we have found empirically, that it is still off by a factor of 2 as mentioned above. So you also need to set `_depth_scale_zoom_factor = 2.0`
 
 Also set `camera_calibration_path: 'utils/calibration/cf_demo_intrinsics.json'` and use the original `goal_position_rdf` of (10m, -1m, -10m)
@@ -168,7 +168,7 @@ data/crazyflie_demo_hallway/
 
 A demo snippet from the original repo:
 
-<img src="utils/reconstruction.gif" height="250px" alt="reconstruction animation"/>
+<img src="utils/reconstruction.gif" height="250px" alt="3D Reconstruction using Open3D and Monocular Depth"/>
 
 ## Running ArduMonoNav
 
@@ -361,7 +361,7 @@ Run these in a safe setup before attempting autonomous flight.
 ArduMonoNav remains a work in progress. Useful directions include:
 
 - Improving planner conservatism in unseen space. Currently, the planner treats unseen space as open so it may make decisions to go into those areas before the actual obstacles there will be detected. 
-- Limit frequency of the main loop so that everyone can potentially obtain similar results without twiddling with the settings mentioned [here](README.md#important-tuning-before-successful-runs)         
+- Limit frequency of the main loop so that everyone can potentially obtain similar results without twiddling with the settings mentioned [here](#important-tuning-before-successful-runs).        
 - Implement a global planner like D*-Lite or RRT* and use ArduPilot's waypoint navigation which is probably more efficient. The current depth map can be constantly evaluated to see if there's an obstacle in front of the vehicle instead of checking the VoxelBlockGrid and a replanning can be triggered.
 - If using motion primitives, it may be better to add a stop and yaw primitive instead of having a constant forward velocity always.
 - Adding ROS/ROS 2 interoperability 

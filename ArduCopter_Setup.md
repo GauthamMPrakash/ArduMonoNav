@@ -21,7 +21,7 @@
 
 ## Software Configuration
 - `EK3_SRC1_POSZ` is generally recommended to be set to baro unless you get wildly varying altitudes/bad reconstruction due to baro noise indoors and you have a flat floor.
-- `EK#_SRC1_VELXY` to OpticalFlow
+- `EK3_SRC1_VELXY` to OpticalFlow
 - `EK3_SRC1_YAW` to Compass
 - Recommended to use terrain following using rangefinder with `WP_RFND_USE = 1`. This will keep the drone hugging the floor gradient and move along staircases while still providing correct actual altitude.
 - Highly recommended to set up a GCS failsafe to Land or SmartRTL (slightly dangerous). This will mean the drone will execute the failsafe if it doesnt receive heartbeat packets due to the code crashing. If you do use a joystick interfaced with a GCS software, that GCS will still send heartbeats by default but you have a method of manual intervention available.
