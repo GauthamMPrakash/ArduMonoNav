@@ -217,6 +217,15 @@ def send_obstacle_distance_message(vehicle):
         with distances_lock:
             distances_to_send = distances.copy()
 
+        # Quick diagnostics: log statistics about the distances being sent
+        try:
+            valid_mask = (distances_to_send != 65535)
+            num_valid = int(np.sum(valid_mask))
+            min_d = int(np.min(distances_to_send[valid_mask])) if num_valid > 0 else None
+            max_d = int(np.max(distances_to_send[valid_mask])) if num_valid > 0 else None
+            mavc.printd(f"OBSTACLE_DISTANCE: valid={num_valid}, min_cm={min_d}, max_cm={max_d}")
+        except Exception:
+            mavc.printd("OBSTACLE_DISTANCE: diagnostics failed to compute statistics")
         vehicle.mav.obstacle_distance_send(
             current_time_us,    # us Timestamp (UNIX time or time since system boot)
             0,                  # sensor_type, defined here: https://mavlink.io/en/messages/common.html#MAV_DISTANCE_SENSOR
@@ -555,7 +564,17 @@ def main():
                 # Send position target only once when entering goal navigation mode
                 if not goal_nav_active:
                     print("Pressed g. Using BendyRuler navigation to goal.")
-                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
+                    # Diagnostics: print heading, camera and goal (EDN) before sending
+                    try:
+                        mavc.printd(f"hdg={hdg} rad ({hdg*180/np.pi} deg)")
+                        mavc.printd(f"camera_position (EDN): {camera_position[0:-1, -1]}")
+                        mavc.printd(f"goal_position (EDN): {goal_position}")
+                    except Exception:
+                        pass
+
+                    # Send position target (expects LOCAL_NED: North, East, Down)
+                    # goal_position is stored internally as [E, D, N] (EDN), so reindex back to N,E,D
+                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1])
                     goal_nav_active = True
                 
                 # Check distance to goal (both in NED frame after heading correction)
@@ -583,7 +602,7 @@ def main():
             shouldStop = True
             goal_nav_active = False
 
-        elif last_key_pressed == 'q':  # end flight immediately
+        elif last_key_pressed == 'p':  # end flight immediately
             print("Pressed q. EMERGENCY STOP.")
             mavc.eSTOP()
             shouldStop = True
