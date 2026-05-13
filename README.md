@@ -117,6 +117,7 @@ Setting the aforementioned parameter to None enables automatic device selection.
 
 ## Demo: Out of the Box!
 
+No rebot required!
 The repository includes a demo_hallway dataset captured by us located at [`data/demo_hallway`](data/demo_hallway):
 
 ```text
