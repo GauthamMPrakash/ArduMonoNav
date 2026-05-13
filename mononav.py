@@ -21,7 +21,7 @@ may require modification for your specific hardware!
 
 """
 
-# TODO: Move image capture and evrtything else except vehicle control outside the second while loop and change parameters like weight_threshold
+# TODO: Move image capture and everything else except vehicle control outside the second while loop and change parameters like weight_threshold
 # to keep similar behaviour while achieving faster processing and finer control
 
 import cv2
@@ -351,6 +351,9 @@ def main():
                 if no_traj_count > 3:                                        # if we fail to find a trajectory for 3 consecutive iterations, it may be safer to stop the vehicle and wait for human intervention rather than continue trying to execute unsafe trajectories
                     # Choose yaw direction based on last chosen trajectory amplitude sign if available,
                     # otherwise default to a small rightward spin (positive yaw_rate).
+
+                    # TODO: Implement a proper yaw direction predictor based on the VBG or recent trajectory scores, rather than just relying on the last chosen trajectory.
+
                     if last_chosen_traj is not None:
                         yaw_direction = -np.sign(amplitudes[last_chosen_traj])
                         yaw_rate = yaw_direction * fallback_spin_rate

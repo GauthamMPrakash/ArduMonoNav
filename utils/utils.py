@@ -26,7 +26,7 @@ from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative i
 import threading                       # For bufferless video capture and pose threading
 
 DEBUG = True
-depth_scale_scaling = True
+depth_scale_scaling = False
 dav2_f = 470.4                         # Focal length of the DepthAnythingV2 training dataset (Hypersim)
 
 _pose_latest = None                    # (timestamp, x, y, z, yaw, pitch, roll)
@@ -478,7 +478,7 @@ def get_calibration_values(camera_calibration_path):
         data = json.load(json_file)
     mtx = np.array(data['camera_matrix'])
     dist = np.array(data['dist_coeffs'])
-    opt_mtx = np.array(data['refined_matrix'])
+    opt_mtx = np.array(data['optimal_matrix'])
     roi = np.array(data['roi'])
     
     return mtx, dist, opt_mtx, roi
@@ -529,7 +529,7 @@ def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, fr
     Args:
         mtx: Camera matrix
         dist: Distortion coefficients
-        optimal_mtx: Optimal camera matrix (after undistortion)
+        optimal_mtx: Refined camera matrix (after undistortion)
         roi: Region of interest [x, y, w, h]
         frame_width: Actual frame width
         frame_height: Actual frame height
@@ -580,20 +580,14 @@ Args:
     image: Input colour image (numpy array or array-like).
     mtx: Camera matrix from calibration.
     dist: Distortion coefficients.
-    optimal_matrix: Optimal camera matrix after undistortion.
+    optimal_matrix: Refined camera matrix after undistortion.
     roi: Region of interest for cropping (x, y, w, h).
     apply_undistort: If False, the original image is returned (cropped if
         ``roi`` is not ``None``); no undistortion is performed.
 """
-def transform_image(image, mtx=None, dist=None, optimal_matrix=None, roi=None, enable_undistort = True, roi_crop = True):
+def transform_image(image, mtx=None, dist=None, optimal_matrix=None, roi=None, enable_undistort = True):
     transformed_image = image
     if enable_undistort:
-        if not roi_crop:
-            if roi is not None:
-                x, y, w, h = roi
-                return image[y:y+h, x:x+w]
-            return image
-
         # cv2 can handle both numpy arrays and other array-like objects efficiently
         transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
                                         mtx, dist, None, optimal_matrix)

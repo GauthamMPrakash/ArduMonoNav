@@ -129,13 +129,13 @@ def main():
                   "camera_matrix": mtx.tolist(),
                   "dist_coeffs": dist.tolist(),
                   "resolution": imsize,
-                  "refined_matrix": new_mtx.tolist(),
+                  "optimal_matrix": new_mtx.tolist(),
                   "roi": list(roi)
                 }
                 with open("intrinsics.json", "w") as f:
                   json.dump(calib_data, f, indent=4)
 
-                print("Data saved to 'intrinsics.json' in your current folder (with refined_matrix and roi).")
+                print("Data saved to 'intrinsics.json' in your current folder (with optimal_matrix and roi).")
                 # ---------------------------------
                 calibrated = True
                 print(f"Success! RMS Error: {ret:.4f}")
