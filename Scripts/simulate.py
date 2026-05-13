@@ -120,7 +120,7 @@ def _load_vbg_npz(npz_path, desired_device):
         return vbg.cuda(int(desired_device.split(":", 1)[1]))
     return vbg.cpu()
 
-config = load_config('config.yml')
+config = load_config('../config.yml')
 if not data_dir:
     data_dir = _latest_data_dir(config["data_dir"])
 else:
