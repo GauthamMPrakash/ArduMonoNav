@@ -20,11 +20,11 @@ save_during_flight : True     # Whether to save images and reconstructions durin
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.0         # determines the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 2.0         # determines the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 7.0              # max depth to include in the reconstruction
-  trunc_voxel_multiplier: 8.0
+  trunc_voxel_multiplier: 6.0 # truncation band width (multiplier × voxel_size); larger = smoother but blurrier reconstruction
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
 # Goal position in RDF frame (metres). 

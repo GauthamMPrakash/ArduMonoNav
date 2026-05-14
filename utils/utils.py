@@ -26,18 +26,17 @@ from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative i
 import threading                       # For bufferless video capture and pose threading
 
 DEBUG = True
-depth_scale_scaling = False
-_depth_scale_zoom_factor = 1.0
+depth_scale_scaling = True
+dav2_f = 470.4                         # Focal length of the DepthAnythingV2 training dataset (Hypersim)
 
-_pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
+_pose_latest = None                    # (timestamp, x, y, z, yaw, pitch, roll)
 _pose_thread = None
 _pose_thread_hz = 15
 
 _stop_event = threading.Event()
-_pose_ready = threading.Event()   # signals first pose is available
+_pose_ready = threading.Event()        # signals first pose is available
 
-_calibration_resolution = (None, None)
-_calibration_roi = None
+ 
 
 def printd(string):
     """
@@ -63,9 +62,15 @@ class VoxelBlockGrid:
         self.device = device
         # Reconstruction Information
         if depth_scale_scaling:
-            factor = _update_depth_scale_zoom_factor()
-            self.depth_scale = depth_scale * factor
-            printd(f"Scaling depth_scale. New value: {self.depth_scale}")
+            # Use focal length from the provided intrinsic matrix (post-undistort/crop).
+            # If no intrinsics provided, fall back to historical baseline.
+            if intrinsic_matrix is not None:
+                K = np.asarray(intrinsic_matrix, dtype=np.float64)
+                focal_length = float((K[0, 0] + K[1, 1]) / 2.0)
+                self.depth_scale = depth_scale * dav2_f / focal_length
+            else:
+                self.depth_scale = depth_scale
+            printd(f"Scaling depth_scale. New value: {self.depth_scale} (focal_length={round(focal_length, 2)})")
         else:
             self.depth_scale = depth_scale
         self.depth_max = depth_max
@@ -475,11 +480,7 @@ def get_calibration_values(camera_calibration_path):
     dist = np.array(data['dist_coeffs'])
     opt_mtx = np.array(data['refined_matrix'])
     roi = np.array(data['roi'])
-    resolution = data.get('resolution', None)
-    if resolution is not None and len(resolution) == 2:
-        _update_depth_scale_zoom_factor(tuple(int(v) for v in resolution), roi)
-    else:
-        _update_depth_scale_zoom_factor(roi=roi)
+    
     return mtx, dist, opt_mtx, roi
 
 
@@ -489,7 +490,6 @@ def get_calibration_resolution(camera_calibration_path):
     resolution = data.get("resolution", None)
     if resolution is None or len(resolution) != 2:
         return None, None
-    _update_depth_scale_zoom_factor(tuple(int(v) for v in resolution), _calibration_roi)
     return int(resolution[0]), int(resolution[1])
 
 
@@ -736,37 +736,3 @@ def map_traj_idx_to_yaw_rate(traj_idx, amplitudes, fallback_rate=0.3):
         return float(sign * abs(fallback_rate))
     except Exception:
         return float(fallback_rate)
-
-def _update_depth_scale_zoom_factor(resolution=None, roi=None, correction_factor = 1.0):
-    """
-    Update the global depth-scale zoom factor from calibration/resolution/ROI.
-
-    The factor is computed from the crop zoom only.
-    """
-    global _calibration_resolution, _calibration_roi, _depth_scale_zoom_factor
-
-    if resolution is not None:
-        _calibration_resolution = resolution
-    if roi is not None:
-        _calibration_roi = roi
-
-    width, height = _calibration_resolution
-    if width is None or height is None or _calibration_roi is None:
-        _depth_scale_zoom_factor = 1.0
-        return _depth_scale_zoom_factor
-
-    roi_array = np.asarray(_calibration_roi).reshape(-1)
-    if roi_array.size < 4:
-        _depth_scale_zoom_factor = 1.0
-        return _depth_scale_zoom_factor
-
-    roi_width = float(roi_array[2])
-    roi_height = float(roi_array[3])
-    if roi_width <= 0.0 or roi_height <= 0.0:
-        _depth_scale_zoom_factor = 1.0
-        return _depth_scale_zoom_factor
-
-    zoom_x = float(width) / roi_width
-    zoom_y = float(height) / roi_height
-    _depth_scale_zoom_factor = correction_factor * (zoom_x + zoom_y) / 2.0
-    return _depth_scale_zoom_factor
