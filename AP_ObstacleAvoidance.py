@@ -319,43 +319,63 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
 
     # Parameters for obstacle distance message
     step = depth_img_width / distances_array_length
+    # Read camera intrinsics if available (prefer optimal_mtx, then mtx).
+    global mtx, optimal_mtx, depth_hfov_deg, depth_vfov_deg, vbg
+    intr = None
+    if 'optimal_mtx' in globals() and optimal_mtx is not None:
+        intr = optimal_mtx
+    elif mtx is not None:
+        intr = mtx
+
+    if intr is not None:
+        fx = float(intr[0, 0])
+        fy = float(intr[1, 1])
+        cx = float(intr[0, 2])
+        cy = float(intr[1, 2])
+    else:
+        # Fallback: assume principal point at image center and estimate focal from FOV if available
+        cx = depth_img_width / 2.0
+        cy = depth_img_height / 2.0
+        fx = (depth_img_width / 2.0) / m.tan(m.radians(depth_hfov_deg) / 2.0)
+        fy = (depth_img_height / 2.0) / m.tan(m.radians(depth_vfov_deg) / 2.0)
 
     for i in range(distances_array_length):
-        # Each range (left to right) is found from a set of rows within a column
-        #  [ ] -> ignored
-        #  [x] -> center + obstacle_line_thickness_pixel / 2
-        #  [x] -> center = obstacle_line_height (moving up and down according to the vehicle's pitch angle)
-        #  [x] -> center - obstacle_line_thickness_pixel / 2
-        #  [ ] -> ignored
-        #   ^ One of [distances_array_length] number of columns, from left to right in the image
         center_pixel = obstacle_line_height
-        upper_pixel = center_pixel + obstacle_line_thickness_pixel / 2
-        lower_pixel = center_pixel - obstacle_line_thickness_pixel / 2
+        upper_pixel = center_pixel + obstacle_line_thickness_pixel / 2.0
+        lower_pixel = center_pixel - obstacle_line_thickness_pixel / 2.0
 
-        # Sanity checks
-        if upper_pixel > depth_img_height:
-            upper_pixel = depth_img_height
-        elif upper_pixel < 1:
-            upper_pixel = 1
-        if lower_pixel > depth_img_height:
-            lower_pixel = depth_img_height - 1
-        elif lower_pixel < 0:
-            lower_pixel = 0
+        # Clamp pixel bounds
+        upper_pixel = int(min(depth_img_height - 1, max(0, upper_pixel)))
+        lower_pixel = int(min(depth_img_height - 1, max(0, lower_pixel)))
 
-        # Convert depth units (typically mm) to meters for obstacle checks.
-        # VBG depth_scale is typically 1000.0, so meters = value * (1.0 / depth_scale)
-        # dist_m = depth_mat[int(obstacle_line_height), int(i * step)] * obstacle_depth_scale_m_per_unit
-        min_point_in_scan = np.min(depth_mat[int(lower_pixel):int(upper_pixel), int(i * step)])
-        dist_m = min_point_in_scan * obstacle_depth_scale_m_per_unit
+        col = int(min(depth_img_width - 1, max(0, int(i * step))))
 
-        # Default value, unless overwritten: 
-        #   A value of max_distance + 1 (cm) means no obstacle is present. 
-        #   A value of UINT16_MAX (65535) for unknown/not used.
+        scan_slice = depth_mat[lower_pixel:upper_pixel + 1, col]
+        # Filter out invalid / zero depth samples
+        valid_mask = scan_slice > 0
+        if not np.any(valid_mask):
+            distances[i] = 65535
+            continue
+
+        min_point = np.min(scan_slice[valid_mask])
+        # Convert to meters using the VBG's depth_scale (depth image units -> meters)
+        if 'vbg' in globals() and hasattr(vbg, 'depth_scale'):
+            depth_scale_used = float(vbg.depth_scale)
+        else:
+            # Fallback: common default is 1000 (mm -> m)
+            depth_scale_used = 1000.0
+        z_m = float(min_point) / depth_scale_used
+
+        # Compute Euclidean (ray) distance from camera origin to the 3D point
+        u = float(col)
+        v = float(center_pixel)
+        x = (u - cx) * z_m / fx
+        y = (v - cy) * z_m / fy
+        euclid_m = m.sqrt(x * x + y * y + z_m * z_m)
+
         distances[i] = 65535
-
-        # Note that dist_m is in meter, while distances[] is in cm.
-        if dist_m > min_depth_m and dist_m < max_depth_m:
-            distances[i] = dist_m * 100
+        if euclid_m > min_depth_m and euclid_m < max_depth_m:
+            distances[i] = int(euclid_m * 100)
 
 def _timesync_loop(period_s, stop_event):
     """Background loop that calls mavc.timesync() every `period_s` seconds.
