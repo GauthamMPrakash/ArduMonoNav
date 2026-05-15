@@ -28,7 +28,7 @@
   </a>
 </p>
 
-ArduMonoNav is a monocular navigation stack that uses RGB images and camera poses to build a 3D reconstruction, enabling conventional planning techniques on a MAV with only a single camera instead of heavy and expensive setups like LiDAR, stereo cameras or RGB-D cameras. The original [MonoNav](https://github.com/natesimon/MonoNav) pipeline used ZoeDepth on a Crazyflie. This fork adapts the pipeline for an **ArduPilot drone** and replaces the depth estimator with the [metric depth version](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth) of **[Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)**.
+ArduMonoNav is a **monocular navigation** stack that uses RGB images and camera poses to build a 3D reconstruction, enabling conventional planning techniques on a MAV with only a single camera instead of heavy and expensive setups like LiDAR, stereo cameras or RGB-D cameras. The original [MonoNav](https://github.com/natesimon/MonoNav) pipeline used ZoeDepth on a Crazyflie. This fork adapts the pipeline for an **ArduPilot drone** and replaces the depth estimator with the [metric depth version](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth) of **[Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2)**.
 
 At each planning step, ArduMonoNav:
 
@@ -107,7 +107,7 @@ pip install -r DepthAnythingV2-metric/requirements.txt
 
 **Tested on:** (release / driver / GPU)  
 - Linux Mint 22.1  / NVIDIA 535 / RTX 3050
-- Linux Mint 22.1  / ----------------- / i3-1125G4 with Intel UHD
+- Linux Mint 22.1  / ----------------- / i3-1125G4 with Intel Xe
 
 ### Depth Anything V2 Checkpoint
 
