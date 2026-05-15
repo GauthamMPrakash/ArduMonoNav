@@ -68,7 +68,7 @@ FLY_VEHICLE = config['FLY_VEHICLE']
 baud = config['baud']
 EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
-STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
+STREAM_URL = config['camera_src']       # YOUR ESP32 HTTP MJPEG stream
 
 DEPTH_RANGE_M = [0.2, 20.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
@@ -160,7 +160,7 @@ min_obstacle_dist_m = config.get('min_obstacle_dist_m', 0.3)
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
-save_dir = config['save_dir_prefix'] + time_string
+save_dir = config['data_dir'] + time_string
 print("Saving files to: " + save_dir)
 npz_save_filename = save_dir + '/vbg.npz'
 
@@ -218,14 +218,12 @@ def send_obstacle_distance_message(vehicle):
             distances_to_send = distances.copy()
 
         # Quick diagnostics: log statistics about the distances being sent
-        try:
-            valid_mask = (distances_to_send != 65535)
-            num_valid = int(np.sum(valid_mask))
-            min_d = int(np.min(distances_to_send[valid_mask])) if num_valid > 0 else None
-            max_d = int(np.max(distances_to_send[valid_mask])) if num_valid > 0 else None
-            mavc.printd(f"OBSTACLE_DISTANCE: valid={num_valid}, min_cm={min_d}, max_cm={max_d}")
-        except Exception:
-            mavc.printd("OBSTACLE_DISTANCE: diagnostics failed to compute statistics")
+        valid_mask = (distances_to_send != 65535)
+        num_valid = int(np.sum(valid_mask))
+        min_d = int(np.min(distances_to_send[valid_mask])) if num_valid > 0 else None
+        max_d = int(np.max(distances_to_send[valid_mask])) if num_valid > 0 else None
+        # mavc.printd(f"OBSTACLE_DISTANCE: valid={num_valid}, min_cm={min_d}, max_cm={max_d}")
+
         vehicle.mav.obstacle_distance_send(
             current_time_us,    # us Timestamp (UNIX time or time since system boot)
             0,                  # sensor_type, defined here: https://mavlink.io/en/messages/common.html#MAV_DISTANCE_SENSOR
@@ -440,7 +438,7 @@ def main():
     timesync_thread.start()
     
     cap = VideoCapture(STREAM_URL)
-    for _ in range(0, max(config['num_pre_depth_frames'], 1)):
+    for _ in range(0, 3):
         bgr = cap.read()
         compute_depth(bgr, depth_anything, INPUT_SIZE, make_colormap=False)
         cv2.waitKey(1)
@@ -478,6 +476,7 @@ def main():
         )
         sender_thread.start()
 
+    time.sleep(1)  # Give some time for everything to initialize
     if FLY_VEHICLE:
         print("Arming Motors!")
         mavc.set_mode('GUIDED')
@@ -485,18 +484,17 @@ def main():
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
 
-    start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
-    hdg = mavc.heading_offset_init()
+    start_pose_thread(10)  # Start background pose polling at 10 Hz (non-blocking)
+    hdg = mavc.get_pose()[3]  # Get initial heading for goal conversion
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
-    print("Goal position (RDF):", goal_position)
     if goal_position is not None:
         goal_position = np.array(
             rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
         )
         print(f"Goal position (NED): {goal_position}")
         goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
-    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+    mavc.printd(f"Heading offset : {hdg*180/np.pi}")
 
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
@@ -592,10 +590,11 @@ def main():
                     except Exception:
                         pass
 
-                    # Send position target (expects LOCAL_NED: North, East, Down)
-                    # goal_position is stored internally as [E, D, N] (EDN), so reindex back to N,E,D
-                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1])
-                    goal_nav_active = True
+                    if not goal_nav_active:
+                        # Send position target (expects LOCAL_NED: North, East, Down)
+                        # goal_position is stored internally as [E, D, N] (EDN), so reindex back to N,E,D
+                        mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1])
+                        goal_nav_active = True
                 
                 # Check distance to goal (both in NED frame after heading correction)
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position)
@@ -606,7 +605,8 @@ def main():
                     goal_nav_active = False
             else:
                 print("Pressed g. Moving forward.")
-                mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
+                mavc.set_mode('BRAKE')
+                mavc.set_mode('LAND') 
 
         elif last_key_pressed == 'h':
             print("Pressed h. Hovering in place.")

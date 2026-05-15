@@ -330,7 +330,7 @@ def main():
             # cv2.waitKey(1)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
-                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold, turn_weight=turn_weight, repulsion_weight=repulsion_weight, fallback_primitive=fallback_primitive)  # Enable DEBUG to print trajectory scores during selection
+                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold, turn_weight=turn_weight, repulsion_weight=repulsion_weight, fallback_primitive=fallback_primitive, DEBUG=False)  # Enable DEBUG to print trajectory scores during selection
                 if max_traj_idx is not None:
                     last_chosen_traj = max_traj_idx
                 break
@@ -519,7 +519,7 @@ def main():
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
             
             # Planner always scores trajectories, but only GO mode applies them.
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold, turn_weight=turn_weight, repulsion_weight=repulsion_weight, allow_fallback_primitive=config.get('allow_fallback_primitive', True))  # Enable DEBUG to print trajectory scores during selection
+            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold, turn_weight=turn_weight, repulsion_weight=repulsion_weight, fallback_primitive=fallback_primitive, DEBUG=False)  # Enable DEBUG to print trajectory scores during selection
             if max_traj_idx is not None:
                 last_chosen_traj = max_traj_idx
              
